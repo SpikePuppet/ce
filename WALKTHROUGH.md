@@ -9,8 +9,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | Milestone | Status |
 | --- | --- |
 | 0: Project foundation | Approved and committed (`fa94010`) |
-| 1: Native window and Metal surface | Implemented and verified; awaiting review |
-| 2: GPU shapes and text | Not started |
+| 1: Native window and Metal surface | Approved and committed (`c9cee43`) |
+| 2: GPU shapes and text | Implemented and verified; awaiting review |
 | 3: Scratch-buffer editing and line numbers | Not started |
 | 4: Mouse selection | Not started |
 | 5: VS Code-style block cursor | Not started |
@@ -27,6 +27,18 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Debug startup output identified `Apple M4 Pro (IntegratedGpu) via Metal`.
 - Formatting, compilation, Clippy with denied warnings, and three lifecycle tests pass.
 - The native window presented, resized, and exited cleanly during interactive verification.
+
+### Milestone 2 review record
+
+- `EditorPreview` owns the temporary `cosmic-text` buffers, font system, and glyph cache.
+- `Renderer` owns the reusable rectangle pipeline, `glyphon` viewport, atlas, and text renderer.
+- A small instanced WGSL pipeline batches the gutter and divider into one rectangle draw call.
+- Line numbers and code use separate buffers and clip bounds, so editor text cannot draw into the gutter.
+- Layout stays in logical points until the rendering boundary, where rectangles and text scale to physical Retina pixels.
+- The `#1e1e1e` theme colors are converted from sRGB to linear values before writing to the sRGB swapchain; `glyphon` performs accurate text-color conversion itself.
+- The glyph atlas and rectangle allocations are reused across redraws.
+- Formatting, compilation, Clippy with denied warnings, and five lifecycle/rendering tests pass.
+- The gutter, divider, line numbers, and Menlo sample rendered, resized, and exited cleanly on the Apple M4 Pro Metal adapter.
 
 ## Product brief
 

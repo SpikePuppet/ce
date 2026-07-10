@@ -12,6 +12,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::render::Renderer;
 use crate::theme;
 
 #[derive(Debug)]
@@ -22,6 +23,8 @@ pub enum GpuError {
     SurfaceUnsupported,
     UnexpectedBackend(Backend),
     SurfaceValidation,
+    PrepareText(glyphon::PrepareError),
+    RenderText(glyphon::RenderError),
 }
 
 impl Display for GpuError {
@@ -48,6 +51,8 @@ impl Display for GpuError {
             Self::SurfaceValidation => {
                 formatter.write_str("wgpu reported a surface validation error")
             }
+            Self::PrepareText(error) => write!(formatter, "could not prepare text: {error}"),
+            Self::RenderText(error) => write!(formatter, "could not render text: {error}"),
         }
     }
 }
@@ -58,6 +63,8 @@ impl Error for GpuError {
             Self::CreateSurface(error) => Some(error),
             Self::RequestAdapter(error) => Some(error),
             Self::RequestDevice(error) => Some(error),
+            Self::PrepareText(error) => Some(error),
+            Self::RenderText(error) => Some(error),
             Self::SurfaceUnsupported | Self::UnexpectedBackend(_) | Self::SurfaceValidation => None,
         }
     }
@@ -77,6 +84,7 @@ pub struct GpuState {
     queue: wgpu::Queue,
     surface_config: SurfaceConfiguration,
     surface_is_configured: bool,
+    renderer: Renderer,
 
     // Keep the window last so it is dropped after the surface that references it.
     window: Arc<Window>,
@@ -136,6 +144,7 @@ impl GpuState {
         if surface_is_configured {
             surface.configure(&device, &surface_config);
         }
+        let renderer = Renderer::new(&device, &queue, surface_config.format);
 
         Ok(Self {
             instance,
@@ -144,6 +153,7 @@ impl GpuState {
             queue,
             surface_config,
             surface_is_configured,
+            renderer,
             window,
         })
     }
@@ -184,6 +194,15 @@ impl GpuState {
             CurrentSurfaceTexture::Validation => return Err(GpuError::SurfaceValidation),
         };
 
+        self.renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                PhysicalSize::new(self.surface_config.width, self.surface_config.height),
+                self.window.scale_factor() as f32,
+            )
+            .map_err(GpuError::PrepareText)?;
+
         let view = frame.texture.create_view(&TextureViewDescriptor {
             label: Some("editor frame view"),
             ..Default::default()
@@ -195,7 +214,7 @@ impl GpuState {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("editor clear pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
@@ -211,10 +230,14 @@ impl GpuState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            self.renderer
+                .render(&mut render_pass)
+                .map_err(GpuError::RenderText)?;
         }
 
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        self.renderer.finish_frame();
 
         if reconfigure_after_present {
             self.configure_surface();

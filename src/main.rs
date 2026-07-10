@@ -1,5 +1,7 @@
 mod app;
+mod editor;
 mod gpu;
+mod render;
 mod theme;
 
 fn main() {

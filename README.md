@@ -6,7 +6,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 ## Current state
 
-Milestone 1 is implemented: the application opens a native macOS window, initializes `wgpu` against Metal, and presents the editor background color. Text editing begins in a later milestone.
+Milestone 2 is implemented: the application opens a native macOS window, renders its gutter through a small Metal-backed rectangle pipeline, and draws a temporary Menlo code sample with `glyphon`. Interactive editing begins in the next milestone.
 
 ```bash
 cargo run
