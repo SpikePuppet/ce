@@ -10,8 +10,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | --- | --- |
 | 0: Project foundation | Approved and committed (`fa94010`) |
 | 1: Native window and Metal surface | Approved and committed (`c9cee43`) |
-| 2: GPU shapes and text | Implemented and verified; awaiting review |
-| 3: Scratch-buffer editing and line numbers | Not started |
+| 2: GPU shapes and text | Approved and committed (`f33a3d1`) |
+| 3: Scratch-buffer editing and line numbers | Implemented and verified; awaiting review |
 | 4: Mouse selection | Not started |
 | 5: VS Code-style block cursor | Not started |
 | 6: MVP hardening | Not started |
@@ -39,6 +39,19 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - The glyph atlas and rectangle allocations are reused across redraws.
 - Formatting, compilation, Clippy with denied warnings, and five lifecycle/rendering tests pass.
 - The gutter, divider, line numbers, and Menlo sample rendered, resized, and exited cleanly on the Apple M4 Pro Metal adapter.
+
+### Milestone 3 review record
+
+- The temporary preview is replaced by an owned `cosmic_text::Editor` scratch buffer.
+- Raw key events are translated into editor intentions in `input.rs`; layout-dependent keyboard mappings do not use physical key positions.
+- Text, Enter, four-space Tab, Backspace, and four arrow motions update the buffer through `cosmic-text` editing primitives.
+- Command- and Control-modified text is suppressed so unimplemented shortcuts cannot insert stray characters; Option-modified Unicode remains valid text.
+- Committed macOS IME text is accepted, while pre-edit UI remains a later hardening task.
+- Line-number text is regenerated only when the logical line count changes, and the gutter can grow at larger digit counts.
+- `cosmic-text` keeps the insertion point visible horizontally and vertically; the line-number buffer mirrors only its vertical scroll.
+- Live resize now configures and presents a new frame inside the resize event instead of leaving AppKit to stretch the previous swapchain image while a redraw waits in the queue.
+- Formatting, compilation, Clippy with denied warnings, and sixteen editor/input/rendering tests pass.
+- Live typing, scrolling, line-number updates, resizing, and shutdown completed without Metal or text-engine errors.
 
 ## Product brief
 

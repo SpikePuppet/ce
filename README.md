@@ -6,7 +6,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 ## Current state
 
-Milestone 2 is implemented: the application opens a native macOS window, renders its gutter through a small Metal-backed rectangle pipeline, and draws a temporary Menlo code sample with `glyphon`. Interactive editing begins in the next milestone.
+Milestone 3 is implemented: the application contains an editable in-memory scratch buffer with multiline typing, four-space Tab, Backspace, arrow-key movement, generated line numbers, and automatic cursor-following scroll. Mouse selection and a visible cursor arrive in later milestones.
 
 ```bash
 cargo run

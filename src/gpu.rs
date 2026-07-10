@@ -12,6 +12,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::input::EditorInput;
 use crate::render::Renderer;
 use crate::theme;
 
@@ -171,6 +172,10 @@ impl GpuState {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.configure_surface();
+    }
+
+    pub fn apply_input(&mut self, input: EditorInput) {
+        self.renderer.apply_input(input);
     }
 
     pub fn render(&mut self) -> Result<RenderOutcome, GpuError> {

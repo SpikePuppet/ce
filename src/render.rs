@@ -13,7 +13,8 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
-use crate::editor::EditorPreview;
+use crate::editor::EditorState;
+use crate::input::EditorInput;
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -226,7 +227,7 @@ pub struct Renderer {
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
-    preview: EditorPreview,
+    editor: EditorState,
 }
 
 impl Renderer {
@@ -243,8 +244,12 @@ impl Renderer {
             text_viewport,
             text_atlas,
             text_renderer,
-            preview: EditorPreview::new(),
+            editor: EditorState::new(),
         }
+    }
+
+    pub fn apply_input(&mut self, input: EditorInput) {
+        self.editor.apply_input(input);
     }
 
     pub fn prepare(
@@ -255,7 +260,8 @@ impl Renderer {
         scale_factor: f32,
     ) -> Result<(), glyphon::PrepareError> {
         let (logical_width, logical_height) = logical_extent(physical_size, scale_factor);
-        self.preview.resize(logical_width, logical_height);
+        self.editor.resize(logical_width, logical_height);
+        let layout = self.editor.layout();
 
         self.text_viewport.update(
             queue,
@@ -268,11 +274,11 @@ impl Renderer {
         let scene_rectangles = [
             Rectangle::new(
                 [0.0, 0.0],
-                [theme::GUTTER_WIDTH, logical_height],
+                [layout.gutter_width, logical_height],
                 theme::GUTTER_BACKGROUND,
             ),
             Rectangle::new(
-                [theme::GUTTER_WIDTH - 1.0, 0.0],
+                [layout.gutter_width - 1.0, 0.0],
                 [1.0, logical_height],
                 theme::GUTTER_DIVIDER,
             ),
@@ -287,10 +293,10 @@ impl Renderer {
 
         let physical_width = physical_size.width.min(i32::MAX as u32) as i32;
         let physical_height = physical_size.height.min(i32::MAX as u32) as i32;
-        let gutter_right = (theme::GUTTER_WIDTH * scale_factor).round() as i32;
+        let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
-        let editor_left = theme::EDITOR_TEXT_LEFT * scale_factor;
-        let (font_system, swash_cache, line_numbers, code) = self.preview.render_parts();
+        let editor_left = layout.code_left * scale_factor;
+        let (font_system, swash_cache, line_numbers, code) = self.editor.render_parts();
         let text_areas = [
             TextArea {
                 buffer: line_numbers,

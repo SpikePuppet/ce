@@ -1,6 +1,7 @@
 mod app;
 mod editor;
 mod gpu;
+mod input;
 mod render;
 mod theme;
 

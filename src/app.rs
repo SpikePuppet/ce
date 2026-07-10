@@ -5,11 +5,12 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
-use winit::event::WindowEvent;
+use winit::event::{Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
+use crate::input::{EditorInput, InputState};
 use crate::theme;
 
 #[derive(Debug)]
@@ -70,6 +71,7 @@ pub fn run() -> Result<(), AppError> {
 #[derive(Default)]
 struct Application {
     gpu: Option<GpuState>,
+    input: InputState,
     failure: Option<AppError>,
 }
 
@@ -85,6 +87,7 @@ impl Application {
         let window = Arc::new(event_loop.create_window(window_attributes)?);
         let gpu = pollster::block_on(GpuState::new(window, event_loop))?;
 
+        gpu.window().set_ime_allowed(true);
         gpu.window().set_visible(true);
         gpu.window().request_redraw();
         self.gpu = Some(gpu);
@@ -96,6 +99,27 @@ impl Application {
             self.failure = Some(error);
         }
         event_loop.exit();
+    }
+
+    fn render_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+
+        match gpu.render() {
+            Ok(RenderOutcome::Retry) => gpu.window().request_redraw(),
+            Ok(RenderOutcome::Presented | RenderOutcome::Skipped) => {}
+            Err(error) => self.fail(event_loop, error.into()),
+        }
+    }
+
+    fn apply_input(&mut self, input: EditorInput) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+
+        gpu.apply_input(input);
+        gpu.window().request_redraw();
     }
 }
 
@@ -129,35 +153,28 @@ impl ApplicationHandler for Application {
             WindowEvent::Resized(size) => {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(size);
-                gpu.window().request_redraw();
+                self.render_frame(event_loop);
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(gpu.window().inner_size());
-                gpu.window().request_redraw();
+                self.render_frame(event_loop);
             }
             WindowEvent::Occluded(false) => {
                 gpu.window().request_redraw();
             }
-            WindowEvent::RedrawRequested => {
-                let render_result = self
-                    .gpu
-                    .as_mut()
-                    .expect("GPU state was checked above")
-                    .render();
-
-                match render_result {
-                    Ok(RenderOutcome::Retry) => {
-                        self.gpu
-                            .as_ref()
-                            .expect("GPU state was checked above")
-                            .window()
-                            .request_redraw();
-                    }
-                    Ok(RenderOutcome::Presented | RenderOutcome::Skipped) => {}
-                    Err(error) => self.fail(event_loop, error.into()),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.input.update_modifiers(modifiers);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(input) = self.input.handle_key_event(&event) {
+                    self.apply_input(input);
                 }
             }
+            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                self.apply_input(EditorInput::InsertText(text));
+            }
+            WindowEvent::RedrawRequested => self.render_frame(event_loop),
             _ => {}
         }
     }
