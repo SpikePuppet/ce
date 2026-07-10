@@ -1,3 +1,10 @@
+mod app;
+mod gpu;
+mod theme;
+
 fn main() {
-    println!("editor: project foundation ready");
+    if let Err(error) = app::run() {
+        eprintln!("editor failed: {error}");
+        std::process::exit(1);
+    }
 }

@@ -8,13 +8,25 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 
 | Milestone | Status |
 | --- | --- |
-| 0: Project foundation | Implemented and verified; awaiting review |
-| 1: Native window and Metal surface | Not started |
+| 0: Project foundation | Approved and committed (`fa94010`) |
+| 1: Native window and Metal surface | Implemented and verified; awaiting review |
 | 2: GPU shapes and text | Not started |
 | 3: Scratch-buffer editing and line numbers | Not started |
 | 4: Mouse selection | Not started |
 | 5: VS Code-style block cursor | Not started |
 | 6: MVP hardening | Not started |
+
+### Milestone 1 review record
+
+- `ApplicationHandler` owns native lifecycle and routes only events for the editor window.
+- `GpuState` owns the Metal instance, surface, device, queue, surface configuration, and window lifetime.
+- The window stays hidden until its surface is configured and a redraw is requested.
+- The event loop waits while idle instead of continuously polling.
+- Zero-sized windows suspend surface rendering without passing invalid dimensions to `wgpu`.
+- Outdated, lost, suboptimal, timed-out, and occluded surface states have explicit recovery behavior.
+- Debug startup output identified `Apple M4 Pro (IntegratedGpu) via Metal`.
+- Formatting, compilation, Clippy with denied warnings, and three lifecycle tests pass.
+- The native window presented, resized, and exited cleanly during interactive verification.
 
 ## Product brief
 
