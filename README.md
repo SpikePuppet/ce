@@ -6,7 +6,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 ## Current state
 
-Milestone 3 is implemented: the application contains an editable in-memory scratch buffer with multiline typing, four-space Tab, Backspace, arrow-key movement, generated line numbers, and automatic cursor-following scroll. Mouse selection and a visible cursor arrive in later milestones.
+Milestone 4 is implemented: the scratch buffer supports click placement and bidirectional, multiline mouse selection in addition to keyboard editing, generated line numbers, and automatic cursor-following scroll. A visible cursor arrives in the next milestone.
 
 ```bash
 cargo run

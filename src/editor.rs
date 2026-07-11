@@ -1,6 +1,6 @@
-use glyphon::cosmic_text::{Align, BufferRef, Scroll};
+use glyphon::cosmic_text::{Align, BufferRef, Motion, Scroll, Selection};
 use glyphon::{
-    Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
+    Action, Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
 
 use crate::input::EditorInput;
@@ -13,6 +13,12 @@ pub struct EditorLayout {
     pub code_left: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelectionRectangle {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+}
+
 pub struct EditorState {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -21,6 +27,7 @@ pub struct EditorState {
     line_count: usize,
     gutter_width: f32,
     logical_size: Option<(f32, f32)>,
+    selection_rectangles: Vec<SelectionRectangle>,
 }
 
 impl EditorState {
@@ -50,17 +57,26 @@ impl EditorState {
             line_count: 1,
             gutter_width: gutter_width_for_line_count(1),
             logical_size: None,
+            selection_rectangles: Vec::new(),
         }
     }
 
     pub fn apply_input(&mut self, input: EditorInput) {
         match input {
-            EditorInput::Action(action) => {
+            EditorInput::Action(action) => self.apply_action(action),
+            EditorInput::InsertText(text) => self.editor.insert_string(&text, None),
+            EditorInput::PointerClick(position) => {
+                let (x, y) = self.editor_coordinates(position);
                 self.editor
                     .borrow_with(&mut self.font_system)
-                    .action(action);
+                    .action(Action::Click { x, y });
             }
-            EditorInput::InsertText(text) => self.editor.insert_string(&text, None),
+            EditorInput::PointerDrag(position) => {
+                let (x, y) = self.editor_coordinates(position);
+                self.editor
+                    .borrow_with(&mut self.font_system)
+                    .action(Action::Drag { x, y });
+            }
         }
 
         let geometry_changed = self.sync_line_number_text();
@@ -89,6 +105,10 @@ impl EditorState {
         }
     }
 
+    pub fn selection_rectangles(&self) -> &[SelectionRectangle] {
+        &self.selection_rectangles
+    }
+
     pub fn render_parts(&mut self) -> (&mut FontSystem, &mut SwashCache, &Buffer, &Buffer) {
         let code = match self.editor.buffer_ref() {
             BufferRef::Owned(buffer) => buffer,
@@ -114,6 +134,38 @@ impl EditorState {
         self.editor.with_buffer_mut(|buffer| {
             buffer.set_size(Some(code_width), Some(content_height));
         });
+    }
+
+    fn apply_action(&mut self, action: Action) {
+        let motion_was_consumed = match action {
+            Action::Motion(motion) => self.collapse_selection_for_motion(motion),
+            _ => false,
+        };
+
+        if !motion_was_consumed {
+            self.editor
+                .borrow_with(&mut self.font_system)
+                .action(action);
+        }
+    }
+
+    fn collapse_selection_for_motion(&mut self, motion: Motion) -> bool {
+        let Some((start, end)) = self.editor.selection_bounds() else {
+            return false;
+        };
+
+        self.editor.set_selection(Selection::None);
+        match motion {
+            Motion::Left => {
+                self.editor.set_cursor(start);
+                true
+            }
+            Motion::Right => {
+                self.editor.set_cursor(end);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn sync_line_number_text(&mut self) -> bool {
@@ -149,6 +201,61 @@ impl EditorState {
         });
         self.line_numbers
             .shape_until_scroll(&mut self.font_system, false);
+        self.rebuild_selection_rectangles();
+    }
+
+    fn editor_coordinates(&self, window_position: [f32; 2]) -> (i32, i32) {
+        let layout = self.layout();
+        let x = (window_position[0] - layout.code_left).max(0.0);
+        let y = (window_position[1] - theme::CONTENT_TOP).max(0.0);
+        (x.round() as i32, y.round() as i32)
+    }
+
+    fn rebuild_selection_rectangles(&mut self) {
+        self.selection_rectangles.clear();
+        let Some((start, end)) = self.editor.selection_bounds() else {
+            return;
+        };
+
+        let rectangles = &mut self.selection_rectangles;
+        self.editor.with_buffer(|buffer| {
+            let buffer_width = buffer.size().0.unwrap_or(0.0);
+            for run in buffer.layout_runs() {
+                if run.line_i < start.line || run.line_i > end.line {
+                    continue;
+                }
+
+                let highlights = run.highlight(start, end).collect::<Vec<_>>();
+                if highlights.is_empty() && run.glyphs.is_empty() && end.line > run.line_i {
+                    rectangles.push(SelectionRectangle {
+                        origin: [0.0, run.line_top],
+                        size: [buffer_width, run.line_height],
+                    });
+                    continue;
+                }
+
+                let highlight_count = highlights.len();
+                for (index, (x, width)) in highlights.into_iter().enumerate() {
+                    let mut left = x;
+                    let mut right = x + width;
+                    if index == highlight_count - 1 && end.line > run.line_i {
+                        if run.rtl {
+                            left = 0.0;
+                        } else {
+                            right = buffer_width;
+                        }
+                    }
+
+                    let width = (right - left).max(0.0);
+                    if width > 0.0 {
+                        rectangles.push(SelectionRectangle {
+                            origin: [left, run.line_top],
+                            size: [width, run.line_height],
+                        });
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -166,7 +273,7 @@ fn gutter_width_for_line_count(line_count: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use glyphon::cosmic_text::Motion;
+    use glyphon::cosmic_text::{Cursor, Motion, Selection};
     use glyphon::{Action, Buffer, Edit};
 
     use super::{EditorState, gutter_width_for_line_count};
@@ -239,6 +346,70 @@ mod tests {
     fn gutter_grows_when_line_numbers_need_more_digits() {
         assert_eq!(gutter_width_for_line_count(1), 64.0);
         assert!(gutter_width_for_line_count(1_000_000) > 64.0);
+    }
+
+    #[test]
+    fn click_and_drag_create_a_visible_selection() {
+        let mut editor = EditorState::new();
+        editor.resize(400.0, 200.0);
+        editor.apply_input(EditorInput::InsertText("hello world".to_owned()));
+        let layout = editor.layout();
+
+        editor.apply_input(EditorInput::PointerClick([
+            layout.code_left + 1.0,
+            crate::theme::CONTENT_TOP + 8.0,
+        ]));
+        editor.apply_input(EditorInput::PointerDrag([
+            layout.code_left + 35.0,
+            crate::theme::CONTENT_TOP + 8.0,
+        ]));
+
+        assert!(editor.editor.selection_bounds().is_some());
+        assert!(!editor.selection_rectangles().is_empty());
+    }
+
+    #[test]
+    fn backwards_selection_has_ordered_bounds_and_is_replaced_by_typing() {
+        let mut editor = EditorState::new();
+        editor.resize(400.0, 200.0);
+        editor.apply_input(EditorInput::InsertText("hello".to_owned()));
+        editor
+            .editor
+            .set_selection(Selection::Normal(Cursor::new(0, 4)));
+        editor.editor.set_cursor(Cursor::new(0, 1));
+        editor.shape_and_sync_scroll();
+
+        assert_eq!(
+            editor.editor.selection_bounds(),
+            Some((Cursor::new(0, 1), Cursor::new(0, 4)))
+        );
+        editor.apply_input(EditorInput::InsertText("i".to_owned()));
+        assert_eq!(code_text(&editor), "hio");
+        assert!(editor.selection_rectangles().is_empty());
+    }
+
+    #[test]
+    fn horizontal_arrows_collapse_an_existing_selection() {
+        let mut editor = EditorState::new();
+        editor.apply_input(EditorInput::InsertText("hello".to_owned()));
+        editor
+            .editor
+            .set_selection(Selection::Normal(Cursor::new(0, 1)));
+        editor.editor.set_cursor(Cursor::new(0, 4));
+
+        editor.apply_input(EditorInput::Action(Action::Motion(Motion::Left)));
+
+        assert_eq!(editor.editor.selection(), Selection::None);
+        assert_eq!(editor.editor.cursor(), Cursor::new(0, 1));
+
+        editor
+            .editor
+            .set_selection(Selection::Normal(Cursor::new(0, 1)));
+        editor.editor.set_cursor(Cursor::new(0, 4));
+        editor.apply_input(EditorInput::Action(Action::Motion(Motion::Right)));
+
+        assert_eq!(editor.editor.selection(), Selection::None);
+        assert_eq!(editor.editor.cursor(), Cursor::new(0, 4));
     }
 
     fn code_text(editor: &EditorState) -> String {

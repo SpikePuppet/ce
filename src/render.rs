@@ -13,7 +13,7 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
-use crate::editor::EditorState;
+use crate::editor::{EditorLayout, EditorState, SelectionRectangle};
 use crate::input::EditorInput;
 use crate::theme;
 
@@ -228,6 +228,7 @@ pub struct Renderer {
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
     editor: EditorState,
+    scene_rectangles: Vec<Rectangle>,
 }
 
 impl Renderer {
@@ -245,6 +246,7 @@ impl Renderer {
             text_atlas,
             text_renderer,
             editor: EditorState::new(),
+            scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
         }
     }
 
@@ -271,24 +273,37 @@ impl Renderer {
             },
         );
 
-        let scene_rectangles = [
-            Rectangle::new(
-                [0.0, 0.0],
-                [layout.gutter_width, logical_height],
-                theme::GUTTER_BACKGROUND,
-            ),
-            Rectangle::new(
-                [layout.gutter_width - 1.0, 0.0],
-                [1.0, logical_height],
-                theme::GUTTER_DIVIDER,
-            ),
-        ];
+        self.scene_rectangles.clear();
+        self.scene_rectangles.push(Rectangle::new(
+            [0.0, 0.0],
+            [layout.gutter_width, logical_height],
+            theme::GUTTER_BACKGROUND,
+        ));
+        self.scene_rectangles.push(Rectangle::new(
+            [layout.gutter_width - 1.0, 0.0],
+            [1.0, logical_height],
+            theme::GUTTER_DIVIDER,
+        ));
+        self.scene_rectangles
+            .extend(
+                self.editor
+                    .selection_rectangles()
+                    .iter()
+                    .filter_map(|rectangle| {
+                        translate_selection_rectangle(
+                            *rectangle,
+                            layout,
+                            logical_width,
+                            logical_height,
+                        )
+                    }),
+            );
         self.rectangles.prepare(
             device,
             queue,
             physical_size,
             scale_factor,
-            &scene_rectangles,
+            &self.scene_rectangles,
         );
 
         let physical_width = physical_size.width.min(i32::MAX as u32) as i32;
@@ -360,9 +375,29 @@ fn logical_extent(physical_size: PhysicalSize<u32>, scale_factor: f32) -> (f32, 
     )
 }
 
+fn translate_selection_rectangle(
+    selection: SelectionRectangle,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Option<Rectangle> {
+    let left = (layout.code_left + selection.origin[0]).max(layout.gutter_width);
+    let top = (theme::CONTENT_TOP + selection.origin[1]).max(0.0);
+    let right = (layout.code_left + selection.origin[0] + selection.size[0]).min(viewport_width);
+    let bottom =
+        (theme::CONTENT_TOP + selection.origin[1] + selection.size[1]).min(viewport_height);
+
+    (right > left && bottom > top).then_some(Rectangle::new(
+        [left, top],
+        [right - left, bottom - top],
+        theme::SELECTION_BACKGROUND,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Rectangle, RectangleInstance, logical_extent};
+    use super::{Rectangle, RectangleInstance, logical_extent, translate_selection_rectangle};
+    use crate::editor::{EditorLayout, SelectionRectangle};
     use winit::dpi::PhysicalSize;
 
     #[test]
@@ -381,5 +416,23 @@ mod tests {
             logical_extent(PhysicalSize::new(1920, 1280), 2.0),
             (960.0, 640.0)
         );
+    }
+
+    #[test]
+    fn horizontally_scrolled_selection_is_clipped_before_the_gutter() {
+        let layout = EditorLayout {
+            gutter_width: 64.0,
+            gutter_text_width: 48.0,
+            code_left: 80.0,
+        };
+        let selection = SelectionRectangle {
+            origin: [-40.0, 0.0],
+            size: [60.0, 24.0],
+        };
+
+        let rectangle = translate_selection_rectangle(selection, layout, 960.0, 640.0)
+            .expect("selection remains partially visible");
+        assert_eq!(rectangle.origin[0], 64.0);
+        assert_eq!(rectangle.size[0], 36.0);
     }
 }

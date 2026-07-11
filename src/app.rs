@@ -166,6 +166,23 @@ impl ApplicationHandler for Application {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.input.update_modifiers(modifiers);
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale_factor = self
+                    .gpu
+                    .as_ref()
+                    .expect("GPU state was checked above")
+                    .window()
+                    .scale_factor();
+                if let Some(input) = self.input.handle_cursor_moved(position, scale_factor) {
+                    self.apply_input(input);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(input) = self.input.handle_mouse_input(state, button) {
+                    self.apply_input(input);
+                }
+            }
+            WindowEvent::Focused(false) => self.input.cancel_pointer_drag(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(input) = self.input.handle_key_event(&event) {
                     self.apply_input(input);

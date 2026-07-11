@@ -11,8 +11,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 0: Project foundation | Approved and committed (`fa94010`) |
 | 1: Native window and Metal surface | Approved and committed (`c9cee43`) |
 | 2: GPU shapes and text | Approved and committed (`f33a3d1`) |
-| 3: Scratch-buffer editing and line numbers | Implemented and verified; awaiting review |
-| 4: Mouse selection | Not started |
+| 3: Scratch-buffer editing and line numbers | Approved and committed (`fca2194`) |
+| 4: Mouse selection | Implemented and verified; awaiting review |
 | 5: VS Code-style block cursor | Not started |
 | 6: MVP hardening | Not started |
 
@@ -52,6 +52,19 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Live resize now configures and presents a new frame inside the resize event instead of leaving AppKit to stretch the previous swapchain image while a redraw waits in the queue.
 - Formatting, compilation, Clippy with denied warnings, and sixteen editor/input/rendering tests pass.
 - Live typing, scrolling, line-number updates, resizing, and shutdown completed without Metal or text-engine errors.
+
+### Milestone 4 review record
+
+- Pointer positions are converted from physical Retina pixels to logical window points once in `input.rs`.
+- Primary-button presses create click intentions, pointer movement while pressed creates drag intentions, and focus loss cancels an active drag.
+- Window-space positions are translated past the dynamic gutter and top padding before `cosmic-text` performs text-layout hit testing.
+- `cosmic-text` remains the source of truth for forward and backward selection ranges and selection replacement/deletion.
+- Plain Left and Right arrows clear an existing selection anchor and collapse to its start or end; other plain motions clear the anchor before moving, preventing a stale selection from reappearing.
+- Selection rectangles are derived from shaped layout runs, including disjoint spans for mixed-direction text and line-edge extension for multiline selections.
+- Derived rectangles are clipped to the editor viewport before entering the instanced GPU rectangle batch, so horizontal scrolling cannot paint over the gutter.
+- Formatting, compilation, Clippy with denied warnings, and twenty-two editor/input/rendering tests pass.
+- Click placement, bidirectional drag selection, multiline selection, replacement, deletion, and shutdown completed without Metal or text-engine errors.
+- Dragging outside the visible viewport to auto-scroll is deferred as the first interaction follow-up after the MVP.
 
 ## Product brief
 
