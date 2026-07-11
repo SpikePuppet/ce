@@ -11,6 +11,8 @@ bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 pollster = "0.4"
 rfd = "0.17.2"
+tree-sitter = "0.26.10"
+tree-sitter-python = "0.25.0"
 unicode-segmentation = "1"
 wgpu = "30"
 winit = "0.30"

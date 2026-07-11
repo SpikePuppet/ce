@@ -22,6 +22,16 @@ pub const LINE_NUMBER_TEXT: glyphon::Color = glyphon::Color::rgb(133, 133, 133);
 pub const CURSOR_TEXT: glyphon::Color = glyphon::Color::rgb(30, 30, 30);
 pub const TAB_ACTIVE_TEXT: glyphon::Color = glyphon::Color::rgb(225, 225, 225);
 pub const TAB_INACTIVE_TEXT: glyphon::Color = glyphon::Color::rgb(150, 150, 150);
+pub const SYNTAX_ATTRIBUTE: glyphon::Color = glyphon::Color::rgb(156, 220, 254);
+pub const SYNTAX_BUILTIN: glyphon::Color = glyphon::Color::rgb(78, 201, 176);
+pub const SYNTAX_COMMENT: glyphon::Color = glyphon::Color::rgb(106, 153, 85);
+pub const SYNTAX_CONSTANT: glyphon::Color = glyphon::Color::rgb(79, 193, 255);
+pub const SYNTAX_FUNCTION: glyphon::Color = glyphon::Color::rgb(220, 220, 170);
+pub const SYNTAX_KEYWORD: glyphon::Color = glyphon::Color::rgb(197, 134, 192);
+pub const SYNTAX_NUMBER: glyphon::Color = glyphon::Color::rgb(181, 206, 168);
+pub const SYNTAX_OPERATOR: glyphon::Color = glyphon::Color::rgb(212, 212, 212);
+pub const SYNTAX_STRING: glyphon::Color = glyphon::Color::rgb(206, 145, 120);
+pub const SYNTAX_TYPE: glyphon::Color = glyphon::Color::rgb(78, 201, 176);
 
 pub const FONT_FAMILY: &str = "Menlo";
 pub const FONT_SIZE: f32 = 15.0;

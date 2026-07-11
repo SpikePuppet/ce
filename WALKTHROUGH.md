@@ -23,8 +23,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 7: File lifecycle | Approved and committed (`883d365`) |
 | 8: Commands, selection, and clipboard | Approved and committed (`72dc051`) |
 | 9: Undo and redo | Approved and committed (`f2396e4`) |
-| 10: Tabs | Implemented; awaiting review |
-| 11: Python syntax highlighting | Planned |
+| 10: Tabs | Approved and committed (`152f1ad`) |
+| 11: Python syntax highlighting | Implemented; awaiting review |
 | 12: Python LSP diagnostics | Planned |
 | 13: Interactive LSP features | Planned |
 
@@ -148,6 +148,17 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Cmd+W protects only the active dirty document, selects a neighboring tab after close, and creates a fresh Untitled document after the final tab closes.
 - Closing the window walks every dirty tab through Save, Don't Save, or Cancel without silently discarding an inactive document.
 - Formatting, compilation, Clippy with denied warnings, fifty-three tests, and the optimized release build pass.
+
+### Milestone 11 review record
+
+- `.py` and `.pyi` documents own a Tree-sitter Python parser, retained syntax tree, highlight query, query cursor, source mirror, and reusable span vector; other files remain parser-free plain text.
+- Editor change records are translated into Tree-sitter `InputEdit` byte and point ranges, including multiline insertions, deletions, selection replacement, Unicode, undo, and redo.
+- Multiple changes in one undo/redo transaction edit the existing tree first and trigger only one incremental reparse and one final text-layout synchronization.
+- The bundled Python highlight query maps comments, strings, keywords, functions, types, numbers, built-ins, constants, operators, and attributes into the editor's dark palette.
+- Absolute query byte ranges are clipped into per-line `cosmic-text` attribute spans while retaining Menlo, selection rectangles, scrolling, and the block cursor.
+- Saving an untitled or plain document as `.py` enables highlighting immediately; Save As to a non-Python extension removes syntax attributes and parser state.
+- Parser and query state live per document, so switching tabs preserves each Python syntax tree without reparsing inactive files.
+- Formatting, compilation, Clippy with denied warnings, fifty-eight tests, and the optimized release build pass.
 
 ## Phase 2 product brief
 
@@ -306,6 +317,24 @@ Exercise several named and untitled documents, especially dirty close and reopen
 - Incrementally edit the syntax tree from document changes.
 - Map captures to the existing dark theme and apply spans without disturbing selection or cursor rendering.
 - Keep unknown file types as plain text.
+
+### Rust concepts
+
+- Incremental syntax trees updated from explicit byte and point edits
+- Translating between document-global byte ranges and line-local attribute ranges
+- Owning native parser state per document without global mutable state
+- Enum-based optional capability state for Python versus plain text
+- Reusing query cursors, span vectors, and shaped text buffers
+
+### Verify
+
+- Opening `.py` and `.pyi` files applies the Python palette; other extensions remain plain.
+- Valid, incomplete, and temporarily invalid Python continue to highlight without blocking edits.
+- Typing, multiline paste, cut, undo, and redo keep parser source identical to editor source.
+- Unicode before and inside changed ranges does not shift subsequent colors.
+- Saving under a Python extension enables highlighting and changing to a plain extension removes it.
+- Tabs retain independent parser trees and do not reparse merely because they become active.
+- Highlight spans remain clipped to editor text and do not affect the gutter, tabs, selection, or line numbers.
 
 ### Review checkpoint
 

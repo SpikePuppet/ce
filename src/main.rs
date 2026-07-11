@@ -6,6 +6,7 @@ mod editor;
 mod gpu;
 mod input;
 mod render;
+mod syntax;
 mod theme;
 
 fn main() {

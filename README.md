@@ -18,6 +18,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Use Tab to insert four spaces.
 - Click to place the cursor; click and drag to select text.
 - Type or press Backspace to replace or delete a selection.
+- Python `.py` and `.pyi` files receive incremental syntax highlighting; other files remain plain text.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
 
@@ -33,7 +34,7 @@ Debug builds print the selected GPU adapter and first presented frame to the ter
 
 The editor supports multiple open documents with one active tab. It does not yet provide:
 
-- Syntax highlighting or language tooling
+- Language-server diagnostics or other language tooling
 - IME pre-edit text or candidate-window positioning
 - Split panes, visible scrollbars, or settings
 

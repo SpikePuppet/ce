@@ -1,10 +1,12 @@
 use glyphon::cosmic_text::{Align, BufferRef, Change, Cursor, Motion, Scroll, Selection};
 use glyphon::{
-    Action, Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
+    Action, Attrs, AttrsList, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping,
+    SwashCache, Wrap,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::input::{EditorCommand, EditorInput};
+use crate::syntax::{HighlightKind, HighlightSpan};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +39,16 @@ pub struct EditorChange {
     change: Change,
     before: EditorPosition,
     after: EditorPosition,
+}
+
+impl EditorChange {
+    pub(crate) fn change_for_direction(&self, undo: bool) -> Change {
+        let mut change = self.change.clone();
+        if undo {
+            change.reverse();
+        }
+        change
+    }
 }
 
 pub struct EditorState {
@@ -167,6 +179,33 @@ impl EditorState {
             .set_text(labels, &text_attributes(), Shaping::Advanced, None);
         self.tab_labels
             .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    pub fn apply_highlights(&mut self, spans: &[HighlightSpan]) {
+        self.set_highlights(spans);
+        self.shape_and_sync_scroll();
+    }
+
+    pub fn set_highlights(&mut self, spans: &[HighlightSpan]) {
+        self.editor.with_buffer_mut(|buffer| {
+            let mut absolute_line_start = 0;
+            for line in &mut buffer.lines {
+                let line_end = absolute_line_start + line.text().len();
+                let mut attrs = AttrsList::new(&text_attributes());
+                for span in spans {
+                    let start = span.range.start.max(absolute_line_start);
+                    let end = span.range.end.min(line_end);
+                    if end > start {
+                        attrs.add_span(
+                            start - absolute_line_start..end - absolute_line_start,
+                            &text_attributes().color(highlight_color(span.kind)),
+                        );
+                    }
+                }
+                line.set_attrs_list(attrs);
+                absolute_line_start = line_end + line.ending().as_str().len();
+            }
+        });
     }
 
     pub fn has_selection(&self) -> bool {
@@ -454,6 +493,21 @@ fn text_attributes() -> Attrs<'static> {
     Attrs::new().family(Family::Name(theme::FONT_FAMILY))
 }
 
+fn highlight_color(kind: HighlightKind) -> glyphon::Color {
+    match kind {
+        HighlightKind::Attribute => theme::SYNTAX_ATTRIBUTE,
+        HighlightKind::Builtin => theme::SYNTAX_BUILTIN,
+        HighlightKind::Comment => theme::SYNTAX_COMMENT,
+        HighlightKind::Constant => theme::SYNTAX_CONSTANT,
+        HighlightKind::Function => theme::SYNTAX_FUNCTION,
+        HighlightKind::Keyword => theme::SYNTAX_KEYWORD,
+        HighlightKind::Number => theme::SYNTAX_NUMBER,
+        HighlightKind::Operator => theme::SYNTAX_OPERATOR,
+        HighlightKind::String => theme::SYNTAX_STRING,
+        HighlightKind::Type => theme::SYNTAX_TYPE,
+    }
+}
+
 fn gutter_width_for_line_count(line_count: usize) -> f32 {
     let digits = line_count.max(1).ilog10() + 1;
     let content_width = theme::GUTTER_LEFT_PADDING
@@ -469,6 +523,7 @@ mod tests {
 
     use super::{EditorState, gutter_width_for_line_count};
     use crate::input::{EditorCommand, EditorInput};
+    use crate::syntax::{HighlightKind, HighlightSpan};
 
     #[test]
     fn scratch_buffer_starts_with_one_empty_line() {
@@ -521,6 +576,32 @@ mod tests {
         editor.finish_history_transaction();
         assert_eq!(editor.text(), "one\ntwo");
         assert_eq!(editor.line_count, 2);
+    }
+
+    #[test]
+    fn absolute_highlight_spans_are_applied_to_each_buffer_line() {
+        let mut editor = EditorState::with_text("# x\n'y'");
+        editor.set_highlights(&[
+            HighlightSpan {
+                range: 0..3,
+                kind: HighlightKind::Comment,
+            },
+            HighlightSpan {
+                range: 4..7,
+                kind: HighlightKind::String,
+            },
+        ]);
+
+        editor.editor.with_buffer(|buffer| {
+            assert_eq!(
+                buffer.lines[0].attrs_list().get_span(0).color_opt,
+                Some(crate::theme::SYNTAX_COMMENT)
+            );
+            assert_eq!(
+                buffer.lines[1].attrs_list().get_span(0).color_opt,
+                Some(crate::theme::SYNTAX_STRING)
+            );
+        });
     }
 
     #[test]

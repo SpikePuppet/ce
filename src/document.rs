@@ -10,6 +10,7 @@ use glyphon::Action;
 use crate::clipboard::ClipboardProvider;
 use crate::editor::{EditorChange, EditorState};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
+use crate::syntax::SyntaxState;
 
 const UNTITLED_NAME: &str = "Untitled";
 const EDIT_GROUP_TIMEOUT: Duration = Duration::from_millis(750);
@@ -59,6 +60,7 @@ pub struct DocumentInfo {
 
 pub struct Document {
     editor: EditorState,
+    syntax: SyntaxState,
     path: Option<PathBuf>,
     history: History,
 }
@@ -134,27 +136,33 @@ impl History {
         self.last_grouped_edit = group.map(|_| now);
     }
 
-    fn undo(&mut self, editor: &mut EditorState) -> bool {
+    fn undo(&mut self, editor: &mut EditorState, syntax: &mut SyntaxState) -> bool {
         self.active_group = None;
         let Some(index) = self.position.checked_sub(1) else {
             return false;
         };
         for change in self.entries[index].changes.iter().rev() {
             editor.apply_history_change(change, true);
+            syntax.edit(change, true);
         }
+        syntax.reparse();
+        editor.set_highlights(syntax.spans());
         editor.finish_history_transaction();
         self.position = index;
         true
     }
 
-    fn redo(&mut self, editor: &mut EditorState) -> bool {
+    fn redo(&mut self, editor: &mut EditorState, syntax: &mut SyntaxState) -> bool {
         self.active_group = None;
         let Some(entry) = self.entries.get(self.position) else {
             return false;
         };
         for change in &entry.changes {
             editor.apply_history_change(change, false);
+            syntax.edit(change, false);
         }
+        syntax.reparse();
+        editor.set_highlights(syntax.spans());
         editor.finish_history_transaction();
         self.position += 1;
         true
@@ -179,6 +187,7 @@ impl Document {
     fn scratch() -> Self {
         Self {
             editor: EditorState::new(),
+            syntax: SyntaxState::Plain,
             path: None,
             history: History::default(),
         }
@@ -194,8 +203,13 @@ impl Document {
             source,
         })?;
 
+        let mut editor = EditorState::with_text(&text);
+        let syntax = SyntaxState::for_path(Some(&canonical_path), &text);
+        editor.apply_highlights(syntax.spans());
+
         Ok(Self {
-            editor: EditorState::with_text(&text),
+            editor,
+            syntax,
             path: Some(canonical_path),
             history: History::default(),
         })
@@ -231,6 +245,9 @@ impl Document {
         let Some(change) = self.editor.apply_input_with_change(input) else {
             return false;
         };
+        self.syntax.edit(&change, false);
+        self.syntax.reparse();
+        self.editor.apply_highlights(self.syntax.spans());
         self.history.record(change, group, now);
         true
     }
@@ -240,6 +257,9 @@ impl Document {
         let Some(change) = self.editor.apply_input_with_change(input) else {
             return false;
         };
+        self.syntax.edit(&change, false);
+        self.syntax.reparse();
+        self.editor.apply_highlights(self.syntax.spans());
         self.history.record(change, None, Instant::now());
         true
     }
@@ -251,6 +271,12 @@ impl Document {
         })?;
         self.path = Some(fs::canonicalize(&path).unwrap_or(path));
         self.history.mark_saved();
+        if self
+            .syntax
+            .update_language(self.path.as_deref(), &self.editor.text())
+        {
+            self.editor.apply_highlights(self.syntax.spans());
+        }
         Ok(())
     }
 
@@ -261,8 +287,8 @@ impl Document {
 
     fn apply_history_command(&mut self, command: HistoryCommand) -> bool {
         match command {
-            HistoryCommand::Undo => self.history.undo(&mut self.editor),
-            HistoryCommand::Redo => self.history.redo(&mut self.editor),
+            HistoryCommand::Undo => self.history.undo(&mut self.editor, &mut self.syntax),
+            HistoryCommand::Redo => self.history.redo(&mut self.editor, &mut self.syntax),
         }
     }
 
@@ -804,6 +830,32 @@ mod tests {
 
         fs::remove_file(first_path).ok();
         fs::remove_file(second_path).ok();
+    }
+
+    #[test]
+    fn saving_under_a_python_extension_enables_and_disables_highlighting() {
+        let python_path = temporary_path("language.py");
+        let text_path = temporary_path("language.txt");
+        let mut documents = Documents::new();
+        documents.apply_input(EditorInput::InsertText(
+            "def greet():\n    return 'hi'\n".to_owned(),
+        ));
+
+        documents.save_active_as(python_path.clone()).unwrap();
+        assert!(matches!(
+            documents.items[documents.active].syntax,
+            crate::syntax::SyntaxState::Python(_)
+        ));
+        assert!(!documents.items[documents.active].syntax.spans().is_empty());
+
+        documents.save_active_as(text_path.clone()).unwrap();
+        assert!(matches!(
+            documents.items[documents.active].syntax,
+            crate::syntax::SyntaxState::Plain
+        ));
+
+        fs::remove_file(python_path).ok();
+        fs::remove_file(text_path).ok();
     }
 
     fn active_text(documents: &Documents) -> String {
