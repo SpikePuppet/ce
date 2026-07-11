@@ -20,8 +20,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 
 | Milestone | Status |
 | --- | --- |
-| 7: File lifecycle | Implemented; awaiting review |
-| 8: Commands, selection, and clipboard | Planned |
+| 7: File lifecycle | Approved and committed (`883d365`) |
+| 8: Commands, selection, and clipboard | Implemented; awaiting review |
 | 9: Undo and redo | Planned |
 | 10: Tabs | Planned |
 | 11: Python syntax highlighting | Planned |
@@ -113,6 +113,18 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - The window title follows the active filename and macOS receives the native document-edited state.
 - Formatting, compilation, Clippy with denied warnings, thirty-six tests, and the optimized release build pass.
 
+### Milestone 8 review record
+
+- Raw key events now produce distinct file, editor, clipboard, and text-editing intentions.
+- Plain Shift+Arrow extends a normal selection from a stable anchor; releasing Shift and moving clears or collapses it with standard insertion-cursor behavior.
+- Option+Left/Right uses Unicode-aware word boundaries, while Option+Up/Down uses paragraph boundaries.
+- Cmd+Left/Right targets line boundaries and Cmd+Up/Down targets document boundaries; every movement supports a Shift selection variant.
+- Cmd+A selects the complete buffer across Unicode and multiple lines.
+- Cmd+C/X/V use a lazily initialized macOS pasteboard through a small `ClipboardProvider` interface.
+- Copy and cut are no-ops without a selection, cut deletes only after a successful pasteboard write, and paste replaces a selection through the normal editor-change path.
+- The production clipboard uses text-only `arboard` features, avoiding image codecs and persistent polling; behavioral tests use an in-memory provider.
+- Formatting, compilation, Clippy with denied warnings, forty-one tests, and the optimized release build pass.
+
 ## Phase 2 product brief
 
 Phase 2 turns the scratch editor into a small Python-focused working editor. Its document model grows into tabs, its input mapping grows into standard macOS editing commands, and language intelligence is layered in locally with Tree-sitter and externally through LSP.
@@ -173,6 +185,23 @@ Review the native panels, title and edited indicator, UTF-8 round trips, and all
 - Add Option+Arrow word movement and Cmd+Arrow line/document movement.
 - Add selection-preserving Shift variants of word, line, and document movement.
 - Put the system clipboard behind a small interface so editing behavior remains testable.
+
+### Rust concepts
+
+- Enums as a command vocabulary between platform input and editor behavior
+- Traits and associated error types for substitutable system boundaries
+- Lazy initialization for fallible resources that should not block startup
+- Selection anchors as interaction state rather than copied text ranges
+
+### Verify
+
+- Cmd+A selects all text, including multiline Unicode content.
+- Cmd+C copies without modifying the document.
+- Cmd+X copies then removes the exact selection and marks the document dirty.
+- Cmd+V inserts or replaces selection text and updates line numbers.
+- Empty and non-text clipboards do not alter the document.
+- Shift, Option+Shift, and Cmd+Shift motions grow and shrink selections in both directions.
+- Plain motion after selection returns to one insertion cursor without resurrecting an old anchor.
 
 ### Review checkpoint
 

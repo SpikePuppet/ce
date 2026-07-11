@@ -8,7 +8,9 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 - Type normally to insert text, including Unicode and committed macOS IME text.
 - Use Cmd+O to open a file, Cmd+S to save, and Cmd+Shift+S to Save As.
+- Use Cmd+A to select all and Cmd+C/X/V to copy, cut, and paste.
 - Use the arrow keys to move the insertion cursor.
+- Hold Shift while moving to select; Option moves by word or paragraph, and Cmd moves to line or document boundaries.
 - Use Backspace to delete and Return to create a line.
 - Use Tab to insert four spaces.
 - Click to place the cursor; click and drag to select text.
@@ -28,9 +30,8 @@ Debug builds print the selected GPU adapter and first presented frame to the ter
 
 The editor currently exposes one active document at a time. It does not yet provide:
 
-- Undo, redo, copy, or paste
+- Undo or redo
 - Syntax highlighting or language tooling
-- Keyboard-extended selection
 - IME pre-edit text or candidate-window positioning
 - Tabs, split panes, visible scrollbars, or settings
 

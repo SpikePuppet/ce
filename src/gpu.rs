@@ -12,8 +12,9 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
-use crate::input::EditorInput;
+use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
 use crate::render::Renderer;
 use crate::theme;
 
@@ -181,6 +182,18 @@ impl GpuState {
 
     pub fn apply_input(&mut self, input: EditorInput) -> bool {
         self.renderer.apply_input(input)
+    }
+
+    pub fn apply_command(&mut self, command: EditorCommand) {
+        self.renderer.apply_command(command);
+    }
+
+    pub fn apply_clipboard_command<C: ClipboardProvider>(
+        &mut self,
+        command: ClipboardCommand,
+        clipboard: &mut C,
+    ) -> Result<bool, C::Error> {
+        self.renderer.apply_clipboard_command(command, clipboard)
     }
 
     pub fn document_info(&self) -> DocumentInfo {

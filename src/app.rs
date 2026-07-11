@@ -12,9 +12,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::platform::macos::WindowExtMacOS;
 use winit::window::{Window, WindowId};
 
+use crate::clipboard::SystemClipboard;
 use crate::cursor::CursorBlink;
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
-use crate::input::{EditorInput, FileCommand, InputState, KeyInput};
+use crate::input::{
+    ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, InputState, KeyInput,
+};
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -79,6 +82,7 @@ pub fn run() -> Result<(), AppError> {
 #[derive(Default)]
 struct Application {
     gpu: Option<GpuState>,
+    clipboard: SystemClipboard,
     input: InputState,
     cursor: CursorBlink,
     failure: Option<AppError>,
@@ -132,9 +136,36 @@ impl Application {
         };
 
         let document_changed = gpu.apply_input(input);
+        self.finish_editor_interaction(document_changed);
+    }
+
+    fn apply_editor_command(&mut self, command: EditorCommand) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        gpu.apply_command(command);
+        self.finish_editor_interaction(false);
+    }
+
+    fn apply_clipboard_command(&mut self, command: ClipboardCommand) {
+        let result = match self.gpu.as_mut() {
+            Some(gpu) => gpu.apply_clipboard_command(command, &mut self.clipboard),
+            None => return,
+        };
+        match result {
+            Ok(true) => self.finish_editor_interaction(true),
+            Ok(false) => {}
+            Err(arboard::Error::ContentNotAvailable) => {}
+            Err(error) => self.show_file_error("Clipboard Error", &error.to_string()),
+        }
+    }
+
+    fn finish_editor_interaction(&mut self, document_changed: bool) {
         self.cursor.reset(Instant::now());
-        gpu.set_cursor_visible(self.cursor.is_visible());
-        gpu.window().request_redraw();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.window().request_redraw();
+        }
 
         if document_changed {
             self.sync_window_document_state();
@@ -173,6 +204,14 @@ impl Application {
             FileCommand::SaveAs => {
                 self.save_document(true);
             }
+        }
+    }
+
+    fn handle_command(&mut self, command: Command) {
+        match command {
+            Command::File(command) => self.handle_file_command(command),
+            Command::Editor(command) => self.apply_editor_command(command),
+            Command::Clipboard(command) => self.apply_clipboard_command(command),
         }
     }
 
@@ -390,7 +429,7 @@ impl ApplicationHandler for Application {
                 if let Some(input) = self.input.handle_key_event(&event) {
                     match input {
                         KeyInput::Editor(input) => self.apply_input(input),
-                        KeyInput::File(command) => self.handle_file_command(command),
+                        KeyInput::Command(command) => self.handle_command(command),
                     }
                 }
             }

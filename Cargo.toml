@@ -6,6 +6,7 @@ rust-version = "1.92"
 description = "A small, native code editor for macOS"
 
 [dependencies]
+arboard = { version = "3.6.1", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 pollster = "0.4"

@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod cursor;
 mod document;
 mod editor;

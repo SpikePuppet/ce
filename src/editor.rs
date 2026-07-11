@@ -1,10 +1,10 @@
-use glyphon::cosmic_text::{Align, BufferRef, Motion, Scroll, Selection};
+use glyphon::cosmic_text::{Align, BufferRef, Cursor, Motion, Scroll, Selection};
 use glyphon::{
     Action, Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::input::EditorInput;
+use crate::input::{EditorCommand, EditorInput};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,6 +111,21 @@ impl EditorState {
         changed
     }
 
+    pub fn apply_command(&mut self, command: EditorCommand) {
+        match command {
+            EditorCommand::Move {
+                motion,
+                extend_selection,
+            } => self.move_cursor(motion, extend_selection),
+            EditorCommand::SelectAll => self.select_all(),
+        }
+        self.shape_and_sync_scroll();
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.editor.copy_selection()
+    }
+
     pub fn text(&self) -> String {
         self.editor.with_buffer(|buffer| {
             let mut text = String::new();
@@ -187,6 +202,30 @@ impl EditorState {
                 .borrow_with(&mut self.font_system)
                 .action(action);
         }
+    }
+
+    fn move_cursor(&mut self, motion: Motion, extend_selection: bool) {
+        if extend_selection {
+            if self.editor.selection() == Selection::None {
+                self.editor
+                    .set_selection(Selection::Normal(self.editor.cursor()));
+            }
+            self.editor
+                .borrow_with(&mut self.font_system)
+                .action(Action::Motion(motion));
+        } else {
+            self.apply_action(Action::Motion(motion));
+        }
+    }
+
+    fn select_all(&mut self) {
+        let end = self.editor.with_buffer(|buffer| {
+            let line = buffer.lines.len().saturating_sub(1);
+            Cursor::new(line, buffer.lines[line].text().len())
+        });
+        self.editor
+            .set_selection(Selection::Normal(Cursor::new(0, 0)));
+        self.editor.set_cursor(end);
     }
 
     fn collapse_selection_for_motion(&mut self, motion: Motion) -> bool {
@@ -346,7 +385,7 @@ mod tests {
     use glyphon::{Action, Buffer, Edit};
 
     use super::{EditorState, gutter_width_for_line_count};
-    use crate::input::EditorInput;
+    use crate::input::{EditorCommand, EditorInput};
 
     #[test]
     fn scratch_buffer_starts_with_one_empty_line() {
@@ -495,6 +534,28 @@ mod tests {
 
         assert_eq!(editor.editor.selection(), Selection::None);
         assert_eq!(editor.editor.cursor(), Cursor::new(0, 4));
+    }
+
+    #[test]
+    fn shift_motion_creates_and_extends_a_selection() {
+        let mut editor = EditorState::with_text("hello world");
+
+        editor.apply_command(EditorCommand::Move {
+            motion: Motion::RightWord,
+            extend_selection: true,
+        });
+
+        assert_eq!(editor.selected_text().as_deref(), Some("hello"));
+        assert!(!editor.selection_rectangles().is_empty());
+    }
+
+    #[test]
+    fn select_all_covers_unicode_and_multiple_lines() {
+        let mut editor = EditorState::with_text("café\n日本");
+
+        editor.apply_command(EditorCommand::SelectAll);
+
+        assert_eq!(editor.selected_text().as_deref(), Some("café\n日本"));
     }
 
     #[test]

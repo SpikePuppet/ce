@@ -13,9 +13,10 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
+use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
 use crate::editor::{CursorRectangle, EditorLayout, SelectionRectangle};
-use crate::input::EditorInput;
+use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -255,6 +256,18 @@ impl Renderer {
 
     pub fn apply_input(&mut self, input: EditorInput) -> bool {
         self.documents.apply_input(input)
+    }
+
+    pub fn apply_command(&mut self, command: EditorCommand) {
+        self.documents.apply_command(command);
+    }
+
+    pub fn apply_clipboard_command<C: ClipboardProvider>(
+        &mut self,
+        command: ClipboardCommand,
+        clipboard: &mut C,
+    ) -> Result<bool, C::Error> {
+        self.documents.apply_clipboard_command(command, clipboard)
     }
 
     pub fn document_info(&self) -> DocumentInfo {

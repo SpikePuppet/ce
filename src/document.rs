@@ -4,8 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use glyphon::Action;
+
+use crate::clipboard::ClipboardProvider;
 use crate::editor::EditorState;
-use crate::input::EditorInput;
+use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
 
 const UNTITLED_NAME: &str = "Untitled";
 
@@ -126,6 +129,40 @@ impl Documents {
         self.items[self.active].apply_input(input)
     }
 
+    pub fn apply_command(&mut self, command: EditorCommand) {
+        self.items[self.active].editor.apply_command(command);
+    }
+
+    pub fn apply_clipboard_command<C: ClipboardProvider>(
+        &mut self,
+        command: ClipboardCommand,
+        clipboard: &mut C,
+    ) -> Result<bool, C::Error> {
+        match command {
+            ClipboardCommand::Copy => {
+                if let Some(text) = self.items[self.active].editor.selected_text() {
+                    clipboard.write_text(text)?;
+                }
+                Ok(false)
+            }
+            ClipboardCommand::Cut => {
+                let Some(text) = self.items[self.active].editor.selected_text() else {
+                    return Ok(false);
+                };
+                clipboard.write_text(text)?;
+                Ok(self.apply_input(EditorInput::Action(Action::Backspace)))
+            }
+            ClipboardCommand::Paste => {
+                let text = clipboard.read_text()?;
+                if text.is_empty() {
+                    Ok(false)
+                } else {
+                    Ok(self.apply_input(EditorInput::InsertText(text)))
+                }
+            }
+        }
+    }
+
     pub fn replace_active_from_path(&mut self, path: PathBuf) -> Result<(), DocumentError> {
         self.items[self.active] = Document::open(path)?;
         Ok(())
@@ -146,7 +183,26 @@ mod tests {
     use glyphon::cosmic_text::Motion;
 
     use super::Documents;
-    use crate::input::EditorInput;
+    use crate::clipboard::ClipboardProvider;
+    use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
+
+    #[derive(Default)]
+    struct MemoryClipboard {
+        text: String,
+    }
+
+    impl ClipboardProvider for MemoryClipboard {
+        type Error = std::convert::Infallible;
+
+        fn read_text(&mut self) -> Result<String, Self::Error> {
+            Ok(self.text.clone())
+        }
+
+        fn write_text(&mut self, text: String) -> Result<(), Self::Error> {
+            self.text = text;
+            Ok(())
+        }
+    }
 
     #[test]
     fn scratch_document_has_a_stable_untitled_identity() {
@@ -197,6 +253,41 @@ mod tests {
 
         fs::remove_file(source_path).ok();
         fs::remove_file(saved_path).ok();
+    }
+
+    #[test]
+    fn clipboard_commands_copy_cut_and_paste_through_the_provider() {
+        let mut documents = Documents::new();
+        let mut clipboard = MemoryClipboard::default();
+        documents.apply_input(EditorInput::InsertText("hello".to_owned()));
+        documents.apply_command(EditorCommand::SelectAll);
+        documents.items[documents.active].dirty = false;
+
+        assert!(
+            !documents
+                .apply_clipboard_command(ClipboardCommand::Copy, &mut clipboard)
+                .unwrap()
+        );
+        assert_eq!(clipboard.text, "hello");
+        assert!(!documents.active_info().dirty);
+
+        assert!(
+            documents
+                .apply_clipboard_command(ClipboardCommand::Cut, &mut clipboard)
+                .unwrap()
+        );
+        assert_eq!(documents.items[documents.active].editor.text(), "");
+        assert!(documents.active_info().dirty);
+
+        clipboard.text = "world".to_owned();
+        documents.items[documents.active].dirty = false;
+        assert!(
+            documents
+                .apply_clipboard_command(ClipboardCommand::Paste, &mut clipboard)
+                .unwrap()
+        );
+        assert_eq!(documents.items[documents.active].editor.text(), "world");
+        assert!(documents.active_info().dirty);
     }
 
     fn temporary_path(name: &str) -> PathBuf {

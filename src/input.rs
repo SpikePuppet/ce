@@ -19,10 +19,33 @@ pub enum FileCommand {
     SaveAs,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorCommand {
+    Move {
+        motion: Motion,
+        extend_selection: bool,
+    },
+    SelectAll,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardCommand {
+    Copy,
+    Cut,
+    Paste,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command {
+    File(FileCommand),
+    Editor(EditorCommand),
+    Clipboard(ClipboardCommand),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyInput {
     Editor(EditorInput),
-    File(FileCommand),
+    Command(Command),
 }
 
 #[derive(Default)]
@@ -42,10 +65,10 @@ impl InputState {
             return None;
         }
 
-        if !event.repeat
-            && let Some(command) = file_command(&event.logical_key, self.modifiers)
+        if let Some(command) = command_for_key(&event.logical_key, self.modifiers)
+            && (!event.repeat || command_repeats(command))
         {
-            return Some(KeyInput::File(command));
+            return Some(KeyInput::Command(command));
         }
 
         action_for_key(&event.logical_key)
@@ -101,6 +124,17 @@ impl InputState {
     }
 }
 
+fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
+    file_command(key, modifiers)
+        .map(Command::File)
+        .or_else(|| clipboard_command(key, modifiers).map(Command::Clipboard))
+        .or_else(|| editor_command(key, modifiers).map(Command::Editor))
+}
+
+fn command_repeats(command: Command) -> bool {
+    matches!(command, Command::Editor(EditorCommand::Move { .. }))
+}
+
 fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
     if !modifiers.super_key() || modifiers.control_key() || modifiers.alt_key() {
         return None;
@@ -123,12 +157,65 @@ fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
     }
 }
 
+fn clipboard_command(key: &Key, modifiers: ModifiersState) -> Option<ClipboardCommand> {
+    if modifiers != ModifiersState::SUPER {
+        return None;
+    }
+
+    let Key::Character(character) = key else {
+        return None;
+    };
+
+    if character.eq_ignore_ascii_case("c") {
+        Some(ClipboardCommand::Copy)
+    } else if character.eq_ignore_ascii_case("x") {
+        Some(ClipboardCommand::Cut)
+    } else if character.eq_ignore_ascii_case("v") {
+        Some(ClipboardCommand::Paste)
+    } else {
+        None
+    }
+}
+
+fn editor_command(key: &Key, modifiers: ModifiersState) -> Option<EditorCommand> {
+    if modifiers.control_key() || (modifiers.super_key() && modifiers.alt_key()) {
+        return None;
+    }
+
+    if modifiers == ModifiersState::SUPER
+        && let Key::Character(character) = key
+        && character.eq_ignore_ascii_case("a")
+    {
+        return Some(EditorCommand::SelectAll);
+    }
+
+    let Key::Named(named_key) = key else {
+        return None;
+    };
+    let motion = match (named_key, modifiers.super_key(), modifiers.alt_key()) {
+        (NamedKey::ArrowLeft, true, false) => Motion::Home,
+        (NamedKey::ArrowRight, true, false) => Motion::End,
+        (NamedKey::ArrowUp, true, false) => Motion::BufferStart,
+        (NamedKey::ArrowDown, true, false) => Motion::BufferEnd,
+        (NamedKey::ArrowLeft, false, true) => Motion::LeftWord,
+        (NamedKey::ArrowRight, false, true) => Motion::RightWord,
+        (NamedKey::ArrowUp, false, true) => Motion::ParagraphStart,
+        (NamedKey::ArrowDown, false, true) => Motion::ParagraphEnd,
+        (NamedKey::ArrowLeft, false, false) => Motion::Left,
+        (NamedKey::ArrowRight, false, false) => Motion::Right,
+        (NamedKey::ArrowUp, false, false) => Motion::Up,
+        (NamedKey::ArrowDown, false, false) => Motion::Down,
+        _ => return None,
+    };
+
+    Some(EditorCommand::Move {
+        motion,
+        extend_selection: modifiers.shift_key(),
+    })
+}
+
 fn action_for_key(key: &Key) -> Option<Action> {
     let action = match key {
-        Key::Named(NamedKey::ArrowLeft) => Action::Motion(Motion::Left),
-        Key::Named(NamedKey::ArrowRight) => Action::Motion(Motion::Right),
-        Key::Named(NamedKey::ArrowUp) => Action::Motion(Motion::Up),
-        Key::Named(NamedKey::ArrowDown) => Action::Motion(Motion::Down),
         Key::Named(NamedKey::Backspace) => Action::Backspace,
         Key::Named(NamedKey::Enter) => Action::Enter,
         Key::Named(NamedKey::Tab) => Action::Indent,
@@ -150,23 +237,31 @@ fn text_input(text: Option<&str>, modifiers: ModifiersState) -> Option<EditorInp
 
 #[cfg(test)]
 mod tests {
-    use glyphon::Action;
     use glyphon::cosmic_text::Motion;
     use winit::dpi::PhysicalPosition;
     use winit::event::{ElementState, Ime, MouseButton};
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-    use super::{EditorInput, FileCommand, InputState, action_for_key, file_command, text_input};
+    use super::{
+        ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, InputState,
+        command_for_key, file_command, text_input,
+    };
 
     #[test]
     fn arrow_keys_map_to_editor_motion() {
         assert_eq!(
-            action_for_key(&Key::Named(NamedKey::ArrowLeft)),
-            Some(Action::Motion(Motion::Left))
+            command_for_key(&Key::Named(NamedKey::ArrowLeft), ModifiersState::empty()),
+            Some(Command::Editor(EditorCommand::Move {
+                motion: Motion::Left,
+                extend_selection: false,
+            }))
         );
         assert_eq!(
-            action_for_key(&Key::Named(NamedKey::ArrowDown)),
-            Some(Action::Motion(Motion::Down))
+            command_for_key(&Key::Named(NamedKey::ArrowDown), ModifiersState::SHIFT),
+            Some(Command::Editor(EditorCommand::Move {
+                motion: Motion::Down,
+                extend_selection: true,
+            }))
         );
     }
 
@@ -191,6 +286,47 @@ mod tests {
                 ModifiersState::SUPER | ModifiersState::SHIFT
             ),
             Some(FileCommand::SaveAs)
+        );
+    }
+
+    #[test]
+    fn macos_clipboard_and_select_all_shortcuts_map_to_commands() {
+        assert_eq!(
+            command_for_key(&Key::Character("a".into()), ModifiersState::SUPER),
+            Some(Command::Editor(EditorCommand::SelectAll))
+        );
+        assert_eq!(
+            command_for_key(&Key::Character("c".into()), ModifiersState::SUPER),
+            Some(Command::Clipboard(ClipboardCommand::Copy))
+        );
+        assert_eq!(
+            command_for_key(&Key::Character("x".into()), ModifiersState::SUPER),
+            Some(Command::Clipboard(ClipboardCommand::Cut))
+        );
+        assert_eq!(
+            command_for_key(&Key::Character("v".into()), ModifiersState::SUPER),
+            Some(Command::Clipboard(ClipboardCommand::Paste))
+        );
+    }
+
+    #[test]
+    fn macos_modified_arrows_map_to_expected_boundaries() {
+        assert_eq!(
+            command_for_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                ModifiersState::ALT | ModifiersState::SHIFT
+            ),
+            Some(Command::Editor(EditorCommand::Move {
+                motion: Motion::LeftWord,
+                extend_selection: true,
+            }))
+        );
+        assert_eq!(
+            command_for_key(&Key::Named(NamedKey::ArrowDown), ModifiersState::SUPER),
+            Some(Command::Editor(EditorCommand::Move {
+                motion: Motion::BufferEnd,
+                extend_selection: false,
+            }))
         );
     }
 
