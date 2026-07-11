@@ -14,7 +14,19 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 3: Scratch-buffer editing and line numbers | Approved and committed (`fca2194`) |
 | 4: Mouse selection | Approved and committed (`2d7430e`) |
 | 5: VS Code-style block cursor | Approved and committed (`f3833be`) |
-| 6: MVP hardening | Implemented; awaiting review |
+| 6: MVP hardening | Approved and committed (`fd0d9bd`) |
+
+### Phase 2 progress
+
+| Milestone | Status |
+| --- | --- |
+| 7: File lifecycle | Implemented; awaiting review |
+| 8: Commands, selection, and clipboard | Planned |
+| 9: Undo and redo | Planned |
+| 10: Tabs | Planned |
+| 11: Python syntax highlighting | Planned |
+| 12: Python LSP diagnostics | Planned |
+| 13: Interactive LSP features | Planned |
 
 ### Milestone 1 review record
 
@@ -88,6 +100,152 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Debug builds report the Metal adapter and first presented frame once; release builds compile those diagnostics out.
 - The README documents every MVP control, its debug behavior, and the current limitations.
 - Formatting, compilation, Clippy with denied warnings, thirty-one tests, and an optimized `arm64` release build pass.
+
+### Milestone 7 review record
+
+- A `Documents` collection owns editor instances from the beginning, while this first file iteration deliberately exposes only one active document.
+- Each `Document` owns its path, dirty state, and `EditorState`; an untitled scratch document is the stable fallback.
+- Native macOS Open, Save, Save As, warning, and error panels come from `rfd` and are parented to the editor window.
+- Cmd+O, Cmd+S, and Cmd+Shift+S cross a file-command boundary instead of being treated as text input.
+- `cosmic-text` change records distinguish actual edits from cursor motion and selection, so the native window edited indicator is accurate.
+- Opening a document preserves its decoded UTF-8 text and line endings; a successful save updates its path and clears dirty state.
+- Opening over or closing a dirty document offers Save, Discard, and Cancel paths; cancelled or failed saves do not discard text.
+- The window title follows the active filename and macOS receives the native document-edited state.
+- Formatting, compilation, Clippy with denied warnings, thirty-six tests, and the optimized release build pass.
+
+## Phase 2 product brief
+
+Phase 2 turns the scratch editor into a small Python-focused working editor. Its document model grows into tabs, its input mapping grows into standard macOS editing commands, and language intelligence is layered in locally with Tree-sitter and externally through LSP.
+
+The agreed sequence is intentionally incremental:
+
+1. Prove file ownership and safe persistence with one active document.
+2. Add standard selection commands and clipboard behavior behind a central command layer.
+3. Build transactional undo and redo from the text engine's reversible change records.
+4. Expose the existing document collection as switchable tabs.
+5. Add incremental Python highlighting with Tree-sitter.
+6. Add Pyright process management, document synchronization, and diagnostics.
+7. Add completion, hover, and go-to-definition after the LSP foundation is stable.
+
+## Milestone 7: File lifecycle
+
+### Build
+
+- Introduce `Document` state containing editor content, path, display name, and dirty state.
+- Own documents through a collection that can expand into tabs without replacing the model.
+- Open UTF-8 files through a native macOS panel.
+- Save named files directly and route untitled documents through Save As.
+- Support explicit Save As for an already named document.
+- Map Cmd+O, Cmd+S, and Cmd+Shift+S to file commands.
+- Display the active filename in the window title and use the native macOS edited indicator.
+- Prompt to Save, Discard, or Cancel before replacing or closing dirty content.
+- Present file decoding and I/O failures without terminating the editor.
+
+### Rust concepts
+
+- Modeling resources with ownership instead of parallel flags
+- Separating user commands from raw keyboard events
+- Path ownership with `Path`, `PathBuf`, and lossy display names
+- Recoverable runtime errors versus fatal application initialization errors
+- Using change records to derive dirty state
+
+### Verify
+
+- Open replaces the scratch buffer with the selected UTF-8 file.
+- Editing marks the window as changed; movement and selection do not.
+- Save writes to the current path and clears the changed state.
+- Save As chooses a new path, updates the title, and saves future changes there.
+- Cancelling any panel leaves document state untouched.
+- Closing or opening over dirty content cannot silently discard it.
+- Failed reads and writes display an error and preserve the current document.
+
+### Review checkpoint
+
+Review the native panels, title and edited indicator, UTF-8 round trips, and all three unsaved-change decisions before adding clipboard commands.
+
+## Milestone 8: Commands, selection, and clipboard
+
+### Build
+
+- Centralize editor commands separately from produced text.
+- Add Cmd+A/C/X/V.
+- Add Shift+Arrow selection.
+- Add Option+Arrow word movement and Cmd+Arrow line/document movement.
+- Add selection-preserving Shift variants of word, line, and document movement.
+- Put the system clipboard behind a small interface so editing behavior remains testable.
+
+### Review checkpoint
+
+Compare keyboard behavior with standard macOS editors, including Unicode word boundaries and empty selections.
+
+## Milestone 9: Undo and redo
+
+### Build
+
+- Add Cmd+Z and Cmd+Shift+Z.
+- Store reversible `cosmic-text` changes in per-document history.
+- Coalesce continuous typing into useful transactions and break groups at movement, selection, paste, newline, deletion-mode changes, or focus changes.
+- Track a saved-history pivot so undoing to the on-disk version clears dirty state.
+
+### Review checkpoint
+
+Review transaction boundaries rather than only checking whether text eventually returns to an earlier value.
+
+## Milestone 10: Tabs
+
+### Build
+
+- Render one tab per document with filename and dirty indication.
+- Open new files into tabs and deduplicate canonical paths.
+- Switch tabs by pointer and keyboard without losing cursor, selection, scroll, or history.
+- Add Cmd+W with per-document unsaved protection.
+- Return to a fresh scratch document after closing the final tab.
+
+### Review checkpoint
+
+Exercise several named and untitled documents, especially dirty close and reopening an already active path.
+
+## Milestone 11: Python syntax highlighting
+
+### Build
+
+- Detect Python from `.py` and `.pyi` paths.
+- Parse with Tree-sitter's Python grammar and standard highlight queries.
+- Incrementally edit the syntax tree from document changes.
+- Map captures to the existing dark theme and apply spans without disturbing selection or cursor rendering.
+- Keep unknown file types as plain text.
+
+### Review checkpoint
+
+Review incomplete and invalid Python as actively as valid examples; highlighting must remain useful while code is being typed.
+
+## Milestone 12: Python LSP diagnostics
+
+### Build
+
+- Discover `pyright-langserver` on `PATH` and degrade clearly when it is unavailable.
+- Supervise the server process over stdio and implement LSP JSON-RPC framing.
+- Initialize against a detected project root and synchronize open, change, save, and close notifications.
+- Convert between UTF-8 editor indices and LSP UTF-16 positions.
+- Deliver background events safely into the native event loop.
+- Render diagnostic severity and ranges and shut the server down cleanly.
+
+### Review checkpoint
+
+Review lifecycle failures, stale diagnostics, multiple open tabs, Unicode positions, and project configuration—not only the happy-path underline.
+
+## Milestone 13: Interactive LSP features
+
+### Build
+
+- Request and display completion items with keyboard navigation.
+- Display hover information.
+- Navigate to definitions, opening or switching documents as needed.
+- Associate responses with document versions so stale asynchronous results cannot replace current UI.
+
+### Review checkpoint
+
+Review cancellation, focus, keyboard ownership, and stale-response behavior for every popup and navigation action.
 
 ## Product brief
 

@@ -9,6 +9,7 @@ description = "A small, native code editor for macOS"
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 pollster = "0.4"
+rfd = "0.17.2"
 unicode-segmentation = "1"
 wgpu = "30"
 winit = "0.30"

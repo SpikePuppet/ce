@@ -70,7 +70,18 @@ impl EditorState {
         }
     }
 
-    pub fn apply_input(&mut self, input: EditorInput) {
+    pub fn with_text(text: &str) -> Self {
+        let mut state = Self::new();
+        state.editor.with_buffer_mut(|buffer| {
+            buffer.set_text(text, &text_attributes(), Shaping::Advanced, None);
+        });
+        state.sync_line_number_text();
+        state.shape_and_sync_scroll();
+        state
+    }
+
+    pub fn apply_input(&mut self, input: EditorInput) -> bool {
+        self.editor.start_change();
         match input {
             EditorInput::Action(action) => self.apply_action(action),
             EditorInput::InsertText(text) => self.editor.insert_string(&text, None),
@@ -87,12 +98,28 @@ impl EditorState {
                     .action(Action::Drag { x, y });
             }
         }
+        let changed = self
+            .editor
+            .finish_change()
+            .is_some_and(|change| !change.items.is_empty());
 
         let geometry_changed = self.sync_line_number_text();
         if geometry_changed && let Some((width, height)) = self.logical_size {
             self.resize_buffers(width, height);
         }
         self.shape_and_sync_scroll();
+        changed
+    }
+
+    pub fn text(&self) -> String {
+        self.editor.with_buffer(|buffer| {
+            let mut text = String::new();
+            for line in &buffer.lines {
+                text.push_str(line.text());
+                text.push_str(line.ending().as_str());
+            }
+            text
+        })
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -345,6 +372,14 @@ mod tests {
         editor.apply_input(EditorInput::InsertText("café 日本 🦀".to_owned()));
 
         assert_eq!(code_text(&editor), "café 日本 🦀");
+    }
+
+    #[test]
+    fn loading_and_serializing_preserves_line_endings() {
+        let source = "one\r\ntwo\nthree\r";
+        let editor = EditorState::with_text(source);
+
+        assert_eq!(editor.text(), source);
     }
 
     #[test]

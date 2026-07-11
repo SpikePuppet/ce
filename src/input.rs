@@ -12,6 +12,19 @@ pub enum EditorInput {
     PointerDrag([f32; 2]),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCommand {
+    Open,
+    Save,
+    SaveAs,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum KeyInput {
+    Editor(EditorInput),
+    File(FileCommand),
+}
+
 #[derive(Default)]
 pub struct InputState {
     modifiers: ModifiersState,
@@ -24,14 +37,21 @@ impl InputState {
         self.modifiers = modifiers.state();
     }
 
-    pub fn handle_key_event(&self, event: &KeyEvent) -> Option<EditorInput> {
+    pub fn handle_key_event(&self, event: &KeyEvent) -> Option<KeyInput> {
         if event.state != ElementState::Pressed {
             return None;
+        }
+
+        if !event.repeat
+            && let Some(command) = file_command(&event.logical_key, self.modifiers)
+        {
+            return Some(KeyInput::File(command));
         }
 
         action_for_key(&event.logical_key)
             .map(EditorInput::Action)
             .or_else(|| text_input(event.text.as_deref(), self.modifiers))
+            .map(KeyInput::Editor)
     }
 
     pub fn handle_cursor_moved(
@@ -81,6 +101,28 @@ impl InputState {
     }
 }
 
+fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
+    if !modifiers.super_key() || modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+
+    let Key::Character(character) = key else {
+        return None;
+    };
+
+    if character.eq_ignore_ascii_case("o") && !modifiers.shift_key() {
+        Some(FileCommand::Open)
+    } else if character.eq_ignore_ascii_case("s") {
+        Some(if modifiers.shift_key() {
+            FileCommand::SaveAs
+        } else {
+            FileCommand::Save
+        })
+    } else {
+        None
+    }
+}
+
 fn action_for_key(key: &Key) -> Option<Action> {
     let action = match key {
         Key::Named(NamedKey::ArrowLeft) => Action::Motion(Motion::Left),
@@ -114,7 +156,7 @@ mod tests {
     use winit::event::{ElementState, Ime, MouseButton};
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-    use super::{EditorInput, InputState, action_for_key, text_input};
+    use super::{EditorInput, FileCommand, InputState, action_for_key, file_command, text_input};
 
     #[test]
     fn arrow_keys_map_to_editor_motion() {
@@ -131,6 +173,25 @@ mod tests {
     #[test]
     fn command_modified_text_is_not_inserted() {
         assert_eq!(text_input(Some("c"), ModifiersState::SUPER), None);
+    }
+
+    #[test]
+    fn macos_file_shortcuts_map_to_commands() {
+        assert_eq!(
+            file_command(&Key::Character("o".into()), ModifiersState::SUPER),
+            Some(FileCommand::Open)
+        );
+        assert_eq!(
+            file_command(&Key::Character("s".into()), ModifiersState::SUPER),
+            Some(FileCommand::Save)
+        );
+        assert_eq!(
+            file_command(
+                &Key::Character("s".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(FileCommand::SaveAs)
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 ## MVP controls
 
 - Type normally to insert text, including Unicode and committed macOS IME text.
+- Use Cmd+O to open a file, Cmd+S to save, and Cmd+Shift+S to Save As.
 - Use the arrow keys to move the insertion cursor.
 - Use Backspace to delete and Return to create a line.
 - Use Tab to insert four spaces.
@@ -25,16 +26,15 @@ Debug builds print the selected GPU adapter and first presented frame to the ter
 
 ## Current limitations
 
-This MVP is intentionally one in-memory scratch buffer. It does not yet provide:
+The editor currently exposes one active document at a time. It does not yet provide:
 
-- File opening or saving
 - Undo, redo, copy, or paste
 - Syntax highlighting or language tooling
 - Keyboard-extended selection
 - IME pre-edit text or candidate-window positioning
 - Tabs, split panes, visible scrollbars, or settings
 
-Closing the window discards its contents.
+Dirty documents prompt before they are replaced or closed.
 
 ## Development checks
 

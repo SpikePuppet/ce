@@ -13,7 +13,8 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
-use crate::editor::{CursorRectangle, EditorLayout, EditorState, SelectionRectangle};
+use crate::document::{DocumentError, DocumentInfo, Documents};
+use crate::editor::{CursorRectangle, EditorLayout, SelectionRectangle};
 use crate::input::EditorInput;
 use crate::theme;
 
@@ -227,7 +228,7 @@ pub struct Renderer {
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
-    editor: EditorState,
+    documents: Documents,
     scene_rectangles: Vec<Rectangle>,
     cursor_visible: bool,
 }
@@ -246,14 +247,26 @@ impl Renderer {
             text_viewport,
             text_atlas,
             text_renderer,
-            editor: EditorState::new(),
+            documents: Documents::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
             cursor_visible: false,
         }
     }
 
-    pub fn apply_input(&mut self, input: EditorInput) {
-        self.editor.apply_input(input);
+    pub fn apply_input(&mut self, input: EditorInput) -> bool {
+        self.documents.apply_input(input)
+    }
+
+    pub fn document_info(&self) -> DocumentInfo {
+        self.documents.active_info()
+    }
+
+    pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
+        self.documents.replace_active_from_path(path)
+    }
+
+    pub fn save_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
+        self.documents.save_active_as(path)
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
@@ -268,8 +281,9 @@ impl Renderer {
         scale_factor: f32,
     ) -> Result<(), glyphon::PrepareError> {
         let (logical_width, logical_height) = logical_extent(physical_size, scale_factor);
-        self.editor.resize(logical_width, logical_height);
-        let layout = self.editor.layout();
+        let editor = self.documents.active_editor_mut();
+        editor.resize(logical_width, logical_height);
+        let layout = editor.layout();
 
         self.text_viewport.update(
             queue,
@@ -292,7 +306,7 @@ impl Renderer {
         ));
         self.scene_rectangles
             .extend(
-                self.editor
+                editor
                     .selection_rectangles()
                     .iter()
                     .filter_map(|rectangle| {
@@ -306,7 +320,7 @@ impl Renderer {
             );
         let cursor_rectangle = self
             .cursor_visible
-            .then(|| self.editor.cursor_rectangle())
+            .then(|| editor.cursor_rectangle())
             .flatten()
             .and_then(|rectangle| {
                 translate_cursor_rectangle(rectangle, layout, logical_width, logical_height)
@@ -327,7 +341,7 @@ impl Renderer {
         let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
         let editor_left = layout.code_left * scale_factor;
-        let (font_system, swash_cache, line_numbers, code) = self.editor.render_parts();
+        let (font_system, swash_cache, line_numbers, code) = editor.render_parts();
         let line_number_area = TextArea {
             buffer: line_numbers,
             left: 0.0,

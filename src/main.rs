@@ -1,5 +1,6 @@
 mod app;
 mod cursor;
+mod document;
 mod editor;
 mod gpu;
 mod input;

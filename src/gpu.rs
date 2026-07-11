@@ -12,6 +12,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::document::{DocumentError, DocumentInfo};
 use crate::input::EditorInput;
 use crate::render::Renderer;
 use crate::theme;
@@ -178,8 +179,20 @@ impl GpuState {
         self.configure_surface();
     }
 
-    pub fn apply_input(&mut self, input: EditorInput) {
-        self.renderer.apply_input(input);
+    pub fn apply_input(&mut self, input: EditorInput) -> bool {
+        self.renderer.apply_input(input)
+    }
+
+    pub fn document_info(&self) -> DocumentInfo {
+        self.renderer.document_info()
+    }
+
+    pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
+        self.renderer.open_document(path)
+    }
+
+    pub fn save_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
+        self.renderer.save_document(path)
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
