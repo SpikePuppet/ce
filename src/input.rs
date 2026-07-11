@@ -68,8 +68,9 @@ impl InputState {
         }
     }
 
-    pub fn cancel_pointer_drag(&mut self) {
+    pub fn reset_pointer(&mut self) {
         self.primary_pointer_down = false;
+        self.pointer_position = None;
     }
 }
 
@@ -167,10 +168,22 @@ mod tests {
         let mut input = InputState::default();
         input.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0), 1.0);
         input.handle_mouse_input(ElementState::Pressed, MouseButton::Left);
-        input.cancel_pointer_drag();
+        input.reset_pointer();
 
         assert_eq!(
             input.handle_cursor_moved(PhysicalPosition::new(20.0, 20.0), 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_loss_discards_pointer_position_before_an_activation_press() {
+        let mut input = InputState::default();
+        input.handle_cursor_moved(PhysicalPosition::new(100.0, 50.0), 1.0);
+        input.reset_pointer();
+
+        assert_eq!(
+            input.handle_mouse_input(ElementState::Pressed, MouseButton::Left),
             None
         );
     }

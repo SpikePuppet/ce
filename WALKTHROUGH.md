@@ -13,7 +13,7 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 2: GPU shapes and text | Approved and committed (`f33a3d1`) |
 | 3: Scratch-buffer editing and line numbers | Approved and committed (`fca2194`) |
 | 4: Mouse selection | Approved and committed (`2d7430e`) |
-| 5: VS Code-style block cursor | Implemented and verified; awaiting review |
+| 5: VS Code-style block cursor | Approved and committed (`f3833be`) |
 | 6: MVP hardening | Not started |
 
 ### Milestone 1 review record
@@ -72,10 +72,11 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - The event loop sleeps with `ControlFlow::WaitUntil` and wakes only once per 530 ms blink phase rather than polling continuously.
 - Typing, keyboard motion, clicking, and dragging reset the cursor to visible and restart its deadline.
 - Losing focus hides the cursor and removes its timer; regaining focus starts a fresh visible phase.
+- Focus loss and pointer exit discard stale pointer coordinates, so a macOS activation press cannot relocate the text cursor to the previous mouse position.
 - Cursor position and width come from shaped layout runs, using the exact grapheme cell advance when available and a one-cell fallback on empty lines or layout edges.
 - The GPU draws the block behind text, then `glyphon` redraws only the glyph region inside the block in the editor background color to preserve contrast.
 - Cursor and text-overlay bounds use the same editor-to-window translation and viewport clipping as selections.
-- Formatting, compilation, Clippy with denied warnings, and twenty-eight cursor/editor/input/rendering tests pass.
+- Formatting, compilation, Clippy with denied warnings, and twenty-nine cursor/editor/input/rendering tests pass.
 - Blink timing, interaction resets, empty-line and end-of-line width, glyph contrast, focus transitions, and shutdown completed without Metal or text-engine errors.
 
 ## Product brief

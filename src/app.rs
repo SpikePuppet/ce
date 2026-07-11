@@ -143,7 +143,7 @@ impl Application {
 
     fn set_cursor_focus(&mut self, focused: bool) {
         if !focused {
-            self.input.cancel_pointer_drag();
+            self.input.reset_pointer();
         }
         self.cursor.set_focused(focused, Instant::now());
 
@@ -212,6 +212,7 @@ impl ApplicationHandler for Application {
                     self.apply_input(input);
                 }
             }
+            WindowEvent::CursorLeft { .. } => self.input.reset_pointer(),
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(input) = self.input.handle_mouse_input(state, button) {
                     self.apply_input(input);
