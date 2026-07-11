@@ -14,7 +14,7 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 3: Scratch-buffer editing and line numbers | Approved and committed (`fca2194`) |
 | 4: Mouse selection | Approved and committed (`2d7430e`) |
 | 5: VS Code-style block cursor | Approved and committed (`f3833be`) |
-| 6: MVP hardening | Not started |
+| 6: MVP hardening | Implemented; awaiting review |
 
 ### Milestone 1 review record
 
@@ -78,6 +78,16 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Cursor and text-overlay bounds use the same editor-to-window translation and viewport clipping as selections.
 - Formatting, compilation, Clippy with denied warnings, and twenty-nine cursor/editor/input/rendering tests pass.
 - Blink timing, interaction resets, empty-line and end-of-line width, glyph contrast, focus transitions, and shutdown completed without Metal or text-engine errors.
+
+### Milestone 6 review record
+
+- Zero-sized windows suspend surface acquisition and restore by configuring the latest non-zero extent; lost, outdated, suboptimal, timed-out, and occluded frames retain explicit recovery behavior.
+- Committed IME text now passes through the testable input-intention boundary, while pre-edit text remains an explicitly documented future feature.
+- Ordinary composed, CJK, and emoji text is preserved by the scratch buffer.
+- Selection geometry consumes shaped highlight spans directly instead of allocating a temporary vector for every selected layout run.
+- Debug builds report the Metal adapter and first presented frame once; release builds compile those diagnostics out.
+- The README documents every MVP control, its debug behavior, and the current limitations.
+- Formatting, compilation, Clippy with denied warnings, thirty-one tests, and an optimized `arm64` release build pass.
 
 ## Product brief
 

@@ -86,6 +86,8 @@ pub struct GpuState {
     surface_config: SurfaceConfiguration,
     surface_is_configured: bool,
     renderer: Renderer,
+    #[cfg(debug_assertions)]
+    first_frame_reported: bool,
 
     // Keep the window last so it is dropped after the surface that references it.
     window: Arc<Window>,
@@ -155,6 +157,8 @@ impl GpuState {
             surface_config,
             surface_is_configured,
             renderer,
+            #[cfg(debug_assertions)]
+            first_frame_reported: false,
             window,
         })
     }
@@ -247,6 +251,7 @@ impl GpuState {
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.renderer.finish_frame();
+        self.report_first_frame();
 
         if reconfigure_after_present {
             self.configure_surface();
@@ -268,6 +273,24 @@ impl GpuState {
         self.configure_surface();
         Ok(())
     }
+
+    #[cfg(debug_assertions)]
+    fn report_first_frame(&mut self) {
+        if self.first_frame_reported {
+            return;
+        }
+
+        eprintln!(
+            "First frame: {}x{} physical pixels at {:.2}x scale",
+            self.surface_config.width,
+            self.surface_config.height,
+            self.window.scale_factor()
+        );
+        self.first_frame_reported = true;
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn report_first_frame(&mut self) {}
 }
 
 fn drawable_extent(size: PhysicalSize<u32>) -> Option<(u32, u32)> {

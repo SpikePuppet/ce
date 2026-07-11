@@ -239,8 +239,8 @@ impl EditorState {
                     continue;
                 }
 
-                let highlights = run.highlight(start, end).collect::<Vec<_>>();
-                if highlights.is_empty() && run.glyphs.is_empty() && end.line > run.line_i {
+                let mut highlights = run.highlight(start, end).peekable();
+                if highlights.peek().is_none() && run.glyphs.is_empty() && end.line > run.line_i {
                     rectangles.push(SelectionRectangle {
                         origin: [0.0, run.line_top],
                         size: [buffer_width, run.line_height],
@@ -248,11 +248,10 @@ impl EditorState {
                     continue;
                 }
 
-                let highlight_count = highlights.len();
-                for (index, (x, width)) in highlights.into_iter().enumerate() {
+                while let Some((x, width)) = highlights.next() {
                     let mut left = x;
                     let mut right = x + width;
-                    if index == highlight_count - 1 && end.line > run.line_i {
+                    if highlights.peek().is_none() && end.line > run.line_i {
                         if run.rtl {
                             left = 0.0;
                         } else {
@@ -338,6 +337,14 @@ mod tests {
         assert_eq!(code_text(&editor), "first\nsecond\nthird");
         assert_eq!(editor.line_count, 3);
         assert_eq!(buffer_text(&editor.line_numbers), "1\n2\n3");
+    }
+
+    #[test]
+    fn unicode_input_is_preserved_in_the_scratch_buffer() {
+        let mut editor = EditorState::new();
+        editor.apply_input(EditorInput::InsertText("café 日本 🦀".to_owned()));
+
+        assert_eq!(code_text(&editor), "café 日本 🦀");
     }
 
     #[test]

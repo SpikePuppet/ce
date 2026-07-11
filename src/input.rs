@@ -1,7 +1,7 @@
 use glyphon::Action;
 use glyphon::cosmic_text::Motion;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton};
+use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +68,13 @@ impl InputState {
         }
     }
 
+    pub fn handle_ime(&self, event: Ime) -> Option<EditorInput> {
+        match event {
+            Ime::Commit(text) if !text.is_empty() => Some(EditorInput::InsertText(text)),
+            Ime::Enabled | Ime::Preedit(_, _) | Ime::Commit(_) | Ime::Disabled => None,
+        }
+    }
+
     pub fn reset_pointer(&mut self) {
         self.primary_pointer_down = false;
         self.pointer_position = None;
@@ -104,7 +111,7 @@ mod tests {
     use glyphon::Action;
     use glyphon::cosmic_text::Motion;
     use winit::dpi::PhysicalPosition;
-    use winit::event::{ElementState, MouseButton};
+    use winit::event::{ElementState, Ime, MouseButton};
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     use super::{EditorInput, InputState, action_for_key, text_input};
@@ -186,5 +193,20 @@ mod tests {
             input.handle_mouse_input(ElementState::Pressed, MouseButton::Left),
             None
         );
+    }
+
+    #[test]
+    fn ime_commit_becomes_text_input_but_preedit_does_not() {
+        let input = InputState::default();
+
+        assert_eq!(
+            input.handle_ime(Ime::Preedit("nihon".to_owned(), Some((5, 5)))),
+            None
+        );
+        assert_eq!(
+            input.handle_ime(Ime::Commit("日本".to_owned())),
+            Some(EditorInput::InsertText("日本".to_owned()))
+        );
+        assert_eq!(input.handle_ime(Ime::Commit(String::new())), None);
     }
 }

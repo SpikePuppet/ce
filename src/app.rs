@@ -6,7 +6,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
-use winit::event::{Ime, StartCause, WindowEvent};
+use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -224,8 +224,10 @@ impl ApplicationHandler for Application {
                     self.apply_input(input);
                 }
             }
-            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
-                self.apply_input(EditorInput::InsertText(text));
+            WindowEvent::Ime(event) => {
+                if let Some(input) = self.input.handle_ime(event) {
+                    self.apply_input(input);
+                }
             }
             WindowEvent::RedrawRequested => self.render_frame(event_loop),
             _ => {}
