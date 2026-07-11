@@ -22,8 +22,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | --- | --- |
 | 7: File lifecycle | Approved and committed (`883d365`) |
 | 8: Commands, selection, and clipboard | Approved and committed (`72dc051`) |
-| 9: Undo and redo | Implemented; awaiting review |
-| 10: Tabs | Planned |
+| 9: Undo and redo | Approved and committed (`f2396e4`) |
+| 10: Tabs | Implemented; awaiting review |
 | 11: Python syntax highlighting | Planned |
 | 12: Python LSP diagnostics | Planned |
 | 13: Interactive LSP features | Planned |
@@ -136,6 +136,18 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Editing after undo truncates the redo branch; if that branch contained the saved pivot, the saved state is correctly marked unreachable.
 - Dirty state is derived from whether the current history position equals the saved pivot, so undoing back to disk clears the native edited indicator and moving past it marks the document dirty again.
 - Formatting, compilation, Clippy with denied warnings, forty-nine tests, and the optimized release build pass.
+
+### Milestone 10 review record
+
+- The existing document collection now exposes multiple independent editor, cursor, selection, scroll, and history states through one active index.
+- The first Open replaces a clean empty scratch tab; later opens append tabs, while reopening a canonical path switches to its existing tab without rereading or duplicating it.
+- Save As refuses a canonical path already owned by another tab, preventing two live buffers from silently targeting the same file.
+- The GPU rectangle batch draws active and inactive tab backgrounds plus a divider, while clipped text areas draw filenames and dirty markers from a reusable buffer.
+- Tab widths share the available window width up to a comfortable maximum, keeping every tab hit-testable as the window narrows.
+- Pointer clicks and Cmd+Shift+[ / ], Control+Tab, and Control+Shift+Tab switch active documents and synchronize the titlebar and native edited state.
+- Cmd+W protects only the active dirty document, selects a neighboring tab after close, and creates a fresh Untitled document after the final tab closes.
+- Closing the window walks every dirty tab through Save, Don't Save, or Cancel without silently discarding an inactive document.
+- Formatting, compilation, Clippy with denied warnings, fifty-three tests, and the optimized release build pass.
 
 ## Phase 2 product brief
 
@@ -260,6 +272,26 @@ Review transaction boundaries rather than only checking whether text eventually 
 - Switch tabs by pointer and keyboard without losing cursor, selection, scroll, or history.
 - Add Cmd+W with per-document unsaved protection.
 - Return to a fresh scratch document after closing the final tab.
+
+### Rust concepts
+
+- Stable document identity through canonical paths
+- Collections with one active owner and independent retained interaction state
+- Mapping shared geometry to both rendering and pointer hit testing
+- Clipped views over different lines of one reusable text buffer
+- Separating close confirmation from the mutation that removes a tab
+
+### Verify
+
+- The first Open reuses an untouched scratch tab; the second creates another tab.
+- Reopening an existing path switches to it without losing unsaved edits.
+- Clicking labels and both keyboard shortcut families switch tabs.
+- Cursor, selection, horizontal/vertical scroll, and undo history survive switching.
+- Dirty markers and the window title follow edits, saves, undo, redo, and switching.
+- Cmd+W supports Save, Don't Save, and Cancel for the active document.
+- Closing the last tab produces one clean Untitled tab.
+- Closing the window protects dirty documents in inactive tabs.
+- Narrowing the window keeps every tab reachable and clips labels inside their own bounds.
 
 ### Review checkpoint
 

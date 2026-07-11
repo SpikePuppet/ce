@@ -18,6 +18,7 @@ const EDIT_GROUP_TIMEOUT: Duration = Duration::from_millis(750);
 pub enum DocumentError {
     Open { path: PathBuf, source: io::Error },
     Save { path: PathBuf, source: io::Error },
+    AlreadyOpen(PathBuf),
 }
 
 impl Display for DocumentError {
@@ -29,6 +30,13 @@ impl Display for DocumentError {
             Self::Save { path, source } => {
                 write!(formatter, "could not save {}: {source}", path.display())
             }
+            Self::AlreadyOpen(path) => {
+                write!(
+                    formatter,
+                    "{} is already open in another tab",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -37,6 +45,7 @@ impl Error for DocumentError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Open { source, .. } | Self::Save { source, .. } => Some(source),
+            Self::AlreadyOpen(_) => None,
         }
     }
 }
@@ -176,14 +185,18 @@ impl Document {
     }
 
     fn open(path: PathBuf) -> Result<Self, DocumentError> {
-        let text = fs::read_to_string(&path).map_err(|source| DocumentError::Open {
+        let canonical_path = fs::canonicalize(&path).map_err(|source| DocumentError::Open {
             path: path.clone(),
+            source,
+        })?;
+        let text = fs::read_to_string(&canonical_path).map_err(|source| DocumentError::Open {
+            path: canonical_path.clone(),
             source,
         })?;
 
         Ok(Self {
             editor: EditorState::with_text(&text),
-            path: Some(path),
+            path: Some(canonical_path),
             history: History::default(),
         })
     }
@@ -236,7 +249,7 @@ impl Document {
             path: path.clone(),
             source,
         })?;
-        self.path = Some(path);
+        self.path = Some(fs::canonicalize(&path).unwrap_or(path));
         self.history.mark_saved();
         Ok(())
     }
@@ -251,6 +264,10 @@ impl Document {
             HistoryCommand::Undo => self.history.undo(&mut self.editor),
             HistoryCommand::Redo => self.history.redo(&mut self.editor),
         }
+    }
+
+    fn is_reusable_scratch(&self) -> bool {
+        self.path.is_none() && !self.history.is_dirty() && self.editor.text().is_empty()
     }
 }
 
@@ -272,14 +289,18 @@ fn edit_group(input: &EditorInput, has_selection: bool) -> Option<EditGroup> {
 pub struct Documents {
     items: Vec<Document>,
     active: usize,
+    tab_labels: String,
 }
 
 impl Documents {
     pub fn new() -> Self {
-        Self {
+        let mut documents = Self {
             items: vec![Document::scratch()],
             active: 0,
-        }
+            tab_labels: String::new(),
+        };
+        documents.refresh_tab_labels();
+        documents
     }
 
     pub fn active_editor_mut(&mut self) -> &mut EditorState {
@@ -290,8 +311,35 @@ impl Documents {
         self.items[self.active].info()
     }
 
+    pub fn info_at(&self, index: usize) -> Option<DocumentInfo> {
+        self.items.get(index).map(Document::info)
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub fn switch_to(&mut self, index: usize) -> bool {
+        if index >= self.items.len() || index == self.active {
+            return false;
+        }
+        self.items[self.active].history.break_group();
+        self.active = index;
+        self.items[self.active].history.break_group();
+        self.refresh_tab_labels();
+        true
+    }
+
     pub fn apply_input(&mut self, input: EditorInput) -> bool {
-        self.items[self.active].apply_input(input)
+        let changed = self.items[self.active].apply_input(input);
+        if changed {
+            self.refresh_tab_labels();
+        }
+        changed
     }
 
     pub fn apply_command(&mut self, command: EditorCommand) {
@@ -299,7 +347,11 @@ impl Documents {
     }
 
     pub fn apply_history_command(&mut self, command: HistoryCommand) -> bool {
-        self.items[self.active].apply_history_command(command)
+        let changed = self.items[self.active].apply_history_command(command);
+        if changed {
+            self.refresh_tab_labels();
+        }
+        changed
     }
 
     pub fn break_history_group(&mut self) {
@@ -324,29 +376,104 @@ impl Documents {
                     return Ok(false);
                 };
                 clipboard.write_text(text)?;
-                Ok(self.items[self.active]
-                    .apply_standalone_input(EditorInput::Action(Action::Backspace)))
+                let changed = self.items[self.active]
+                    .apply_standalone_input(EditorInput::Action(Action::Backspace));
+                if changed {
+                    self.refresh_tab_labels();
+                }
+                Ok(changed)
             }
             ClipboardCommand::Paste => {
                 let text = clipboard.read_text()?;
                 if text.is_empty() {
                     Ok(false)
                 } else {
-                    Ok(self.items[self.active]
-                        .apply_standalone_input(EditorInput::InsertText(text)))
+                    let changed = self.items[self.active]
+                        .apply_standalone_input(EditorInput::InsertText(text));
+                    if changed {
+                        self.refresh_tab_labels();
+                    }
+                    Ok(changed)
                 }
             }
         }
     }
 
-    pub fn replace_active_from_path(&mut self, path: PathBuf) -> Result<(), DocumentError> {
-        self.items[self.active] = Document::open(path)?;
+    pub fn open_path(&mut self, path: PathBuf) -> Result<(), DocumentError> {
+        let canonical_path = fs::canonicalize(&path).map_err(|source| DocumentError::Open {
+            path: path.clone(),
+            source,
+        })?;
+        if let Some(index) = self
+            .items
+            .iter()
+            .position(|existing| existing.path.as_ref() == Some(&canonical_path))
+        {
+            self.switch_to(index);
+            return Ok(());
+        }
+
+        let document = Document::open(canonical_path)?;
+        if self.items.len() == 1 && self.items[0].is_reusable_scratch() {
+            self.items[0] = document;
+            self.active = 0;
+        } else {
+            self.items.push(document);
+            self.active = self.items.len() - 1;
+        }
+        self.refresh_tab_labels();
         Ok(())
     }
 
     pub fn save_active_as(&mut self, path: PathBuf) -> Result<(), DocumentError> {
-        self.items[self.active].save_as(path)
+        let identity = canonical_identity(&path);
+        if self.items.iter().enumerate().any(|(index, document)| {
+            index != self.active
+                && document.path.as_deref().map(canonical_identity).as_ref() == Some(&identity)
+        }) {
+            return Err(DocumentError::AlreadyOpen(path));
+        }
+
+        self.items[self.active].save_as(path)?;
+        self.refresh_tab_labels();
+        Ok(())
     }
+
+    pub fn close_active(&mut self) {
+        if self.items.len() == 1 {
+            self.items[0] = Document::scratch();
+            self.active = 0;
+        } else {
+            self.items.remove(self.active);
+            self.active = self.active.min(self.items.len() - 1);
+        }
+        self.refresh_tab_labels();
+    }
+
+    fn refresh_tab_labels(&mut self) {
+        self.tab_labels.clear();
+        for (index, document) in self.items.iter().enumerate() {
+            if index > 0 {
+                self.tab_labels.push('\n');
+            }
+            if document.history.is_dirty() {
+                self.tab_labels.push_str("● ");
+            }
+            self.tab_labels.push_str(&document.info().display_name);
+        }
+        self.items[self.active]
+            .editor
+            .set_tab_labels(&self.tab_labels);
+    }
+}
+
+fn canonical_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        let file_name = path.file_name().unwrap_or_default();
+        path.parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .map_or_else(|| path.to_path_buf(), |parent| parent.join(file_name))
+    })
 }
 
 #[cfg(test)]
@@ -408,7 +535,7 @@ mod tests {
 
         let mut documents = Documents::new();
         documents
-            .replace_active_from_path(source_path.clone())
+            .open_path(source_path.clone())
             .expect("open fixture");
         assert_eq!(
             documents.items[documents.active].editor.text(),
@@ -424,7 +551,10 @@ mod tests {
             fs::read_to_string(&saved_path).unwrap(),
             "# header\nprint('hello')\n"
         );
-        assert_eq!(documents.active_info().path, Some(saved_path.clone()));
+        assert_eq!(
+            documents.active_info().path,
+            Some(fs::canonicalize(&saved_path).unwrap())
+        );
         assert!(!documents.active_info().dirty);
 
         fs::remove_file(source_path).ok();
@@ -592,6 +722,88 @@ mod tests {
 
         assert!(!documents.apply_history_command(HistoryCommand::Redo));
         assert_eq!(active_text(&documents), "x");
+    }
+
+    #[test]
+    fn opening_files_reuses_scratch_then_adds_and_deduplicates_tabs() {
+        let first_path = temporary_path("first.py");
+        let second_path = temporary_path("second.py");
+        fs::write(&first_path, "first").unwrap();
+        fs::write(&second_path, "second").unwrap();
+        let mut documents = Documents::new();
+
+        documents.open_path(first_path.clone()).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents.active_index(), 0);
+
+        documents.open_path(second_path.clone()).unwrap();
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents.active_index(), 1);
+        documents.apply_input(EditorInput::InsertText("!".to_owned()));
+        assert_eq!(active_text(&documents), "!second");
+        assert!(documents.tab_labels.contains("● "));
+
+        documents.open_path(first_path.clone()).unwrap();
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents.active_index(), 0);
+        assert_eq!(active_text(&documents), "first");
+        assert!(documents.switch_to(1));
+        assert_eq!(active_text(&documents), "!second");
+        assert!(documents.apply_history_command(HistoryCommand::Undo));
+        assert_eq!(active_text(&documents), "second");
+        assert!(documents.switch_to(0));
+        assert_eq!(active_text(&documents), "first");
+        assert!(!documents.apply_history_command(HistoryCommand::Undo));
+
+        fs::remove_file(first_path).ok();
+        fs::remove_file(second_path).ok();
+    }
+
+    #[test]
+    fn closing_tabs_selects_a_neighbor_and_final_close_restores_scratch() {
+        let first_path = temporary_path("close-first.py");
+        let second_path = temporary_path("close-second.py");
+        fs::write(&first_path, "first").unwrap();
+        fs::write(&second_path, "second").unwrap();
+        let mut documents = Documents::new();
+        documents.open_path(first_path.clone()).unwrap();
+        documents.open_path(second_path.clone()).unwrap();
+
+        documents.close_active();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(
+            documents.active_info().path,
+            Some(fs::canonicalize(&first_path).unwrap())
+        );
+        documents.close_active();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents.active_info().display_name, "Untitled");
+        assert_eq!(active_text(&documents), "");
+        assert!(!documents.active_info().dirty);
+
+        fs::remove_file(first_path).ok();
+        fs::remove_file(second_path).ok();
+    }
+
+    #[test]
+    fn save_as_rejects_a_path_owned_by_another_tab() {
+        let first_path = temporary_path("owned-first.py");
+        let second_path = temporary_path("owned-second.py");
+        fs::write(&first_path, "first").unwrap();
+        fs::write(&second_path, "second").unwrap();
+        let mut documents = Documents::new();
+        documents.open_path(first_path.clone()).unwrap();
+        documents.open_path(second_path.clone()).unwrap();
+
+        let error = documents
+            .save_active_as(first_path.clone())
+            .expect_err("another tab owns the canonical path");
+        assert!(matches!(error, super::DocumentError::AlreadyOpen(_)));
+        assert_eq!(fs::read_to_string(&first_path).unwrap(), "first");
+        assert_eq!(active_text(&documents), "second");
+
+        fs::remove_file(first_path).ok();
+        fs::remove_file(second_path).ok();
     }
 
     fn active_text(documents: &Documents) -> String {

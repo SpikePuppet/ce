@@ -10,6 +10,8 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Use Cmd+O to open a file, Cmd+S to save, and Cmd+Shift+S to Save As.
 - Use Cmd+A to select all and Cmd+C/X/V to copy, cut, and paste.
 - Use Cmd+Z to undo and Cmd+Shift+Z to redo.
+- Click a tab to switch documents; Control+Tab and Control+Shift+Tab cycle between them.
+- Use Cmd+Shift+[ or Cmd+Shift+] as an alternate tab-switching shortcut, and Cmd+W to close the active tab.
 - Use the arrow keys to move the insertion cursor.
 - Hold Shift while moving to select; Option moves by word or paragraph, and Cmd moves to line or document boundaries.
 - Use Backspace to delete and Return to create a line.
@@ -29,13 +31,13 @@ Debug builds print the selected GPU adapter and first presented frame to the ter
 
 ## Current limitations
 
-The editor currently exposes one active document at a time. It does not yet provide:
+The editor supports multiple open documents with one active tab. It does not yet provide:
 
 - Syntax highlighting or language tooling
 - IME pre-edit text or candidate-window positioning
-- Tabs, split panes, visible scrollbars, or settings
+- Split panes, visible scrollbars, or settings
 
-Dirty documents prompt before they are replaced or closed.
+Dirty documents prompt before their tab or the window is closed.
 
 ## Development checks
 

@@ -17,6 +17,9 @@ pub enum FileCommand {
     Open,
     Save,
     SaveAs,
+    Close,
+    NextTab,
+    PreviousTab,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,6 +166,18 @@ fn command_repeats(command: Command) -> bool {
 }
 
 fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
+    if matches!(key, Key::Named(NamedKey::Tab))
+        && modifiers.control_key()
+        && !modifiers.super_key()
+        && !modifiers.alt_key()
+    {
+        return Some(if modifiers.shift_key() {
+            FileCommand::PreviousTab
+        } else {
+            FileCommand::NextTab
+        });
+    }
+
     if !modifiers.super_key() || modifiers.control_key() || modifiers.alt_key() {
         return None;
     }
@@ -179,6 +194,12 @@ fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
         } else {
             FileCommand::Save
         })
+    } else if character.eq_ignore_ascii_case("w") && !modifiers.shift_key() {
+        Some(FileCommand::Close)
+    } else if modifiers.shift_key() && matches!(character.as_str(), "]" | "}") {
+        Some(FileCommand::NextTab)
+    } else if modifiers.shift_key() && matches!(character.as_str(), "[" | "{") {
+        Some(FileCommand::PreviousTab)
     } else {
         None
     }
@@ -313,6 +334,24 @@ mod tests {
                 ModifiersState::SUPER | ModifiersState::SHIFT
             ),
             Some(FileCommand::SaveAs)
+        );
+        assert_eq!(
+            file_command(&Key::Character("w".into()), ModifiersState::SUPER),
+            Some(FileCommand::Close)
+        );
+        assert_eq!(
+            file_command(
+                &Key::Character("]".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(FileCommand::NextTab)
+        );
+        assert_eq!(
+            file_command(
+                &Key::Named(NamedKey::Tab),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            Some(FileCommand::PreviousTab)
         );
     }
 

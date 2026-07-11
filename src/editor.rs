@@ -42,6 +42,8 @@ pub struct EditorChange {
 pub struct EditorState {
     font_system: FontSystem,
     swash_cache: SwashCache,
+    tab_labels: Buffer,
+    tab_label_text: String,
     line_numbers: Buffer,
     editor: Editor<'static>,
     line_count: usize,
@@ -70,9 +72,15 @@ impl EditorState {
         line_numbers.set_wrap(Wrap::None);
         line_numbers.set_text("1", &attrs, Shaping::Advanced, Some(Align::Right));
 
+        let mut tab_labels = Buffer::new(&mut font_system, metrics);
+        tab_labels.set_wrap(Wrap::None);
+        tab_labels.set_text("Untitled", &attrs, Shaping::Advanced, None);
+
         Self {
             font_system,
             swash_cache,
+            tab_labels,
+            tab_label_text: "Untitled".to_owned(),
             line_numbers,
             editor,
             line_count: 1,
@@ -149,6 +157,18 @@ impl EditorState {
         self.editor.copy_selection()
     }
 
+    pub fn set_tab_labels(&mut self, labels: &str) {
+        if self.tab_label_text == labels {
+            return;
+        }
+        self.tab_label_text.clear();
+        self.tab_label_text.push_str(labels);
+        self.tab_labels
+            .set_text(labels, &text_attributes(), Shaping::Advanced, None);
+        self.tab_labels
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
     pub fn has_selection(&self) -> bool {
         self.editor.selection() != Selection::None
     }
@@ -209,7 +229,9 @@ impl EditorState {
         self.cursor_rectangle
     }
 
-    pub fn render_parts(&mut self) -> (&mut FontSystem, &mut SwashCache, &Buffer, &Buffer) {
+    pub fn render_parts(
+        &mut self,
+    ) -> (&mut FontSystem, &mut SwashCache, &Buffer, &Buffer, &Buffer) {
         let code = match self.editor.buffer_ref() {
             BufferRef::Owned(buffer) => buffer,
             BufferRef::Borrowed(buffer) => buffer,
@@ -219,6 +241,7 @@ impl EditorState {
         (
             &mut self.font_system,
             &mut self.swash_cache,
+            &self.tab_labels,
             &self.line_numbers,
             code,
         )

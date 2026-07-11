@@ -208,6 +208,31 @@ impl GpuState {
         self.renderer.document_info()
     }
 
+    pub fn document_info_at(&self, index: usize) -> Option<DocumentInfo> {
+        self.renderer.document_info_at(index)
+    }
+
+    pub fn document_count(&self) -> usize {
+        self.renderer.document_count()
+    }
+
+    pub fn active_document_index(&self) -> usize {
+        self.renderer.active_document_index()
+    }
+
+    pub fn switch_document(&mut self, index: usize) -> bool {
+        self.renderer.switch_document(index)
+    }
+
+    pub fn close_active_document(&mut self) {
+        self.renderer.close_active_document();
+    }
+
+    pub fn tab_at_position(&self, position: [f32; 2]) -> Option<usize> {
+        let logical_width = self.surface_config.width as f32 / self.window.scale_factor() as f32;
+        self.renderer.tab_at_position(position, logical_width)
+    }
+
     pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
         self.renderer.open_document(path)
     }

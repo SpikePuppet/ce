@@ -132,6 +132,26 @@ impl Application {
     }
 
     fn apply_input(&mut self, input: EditorInput) {
+        if let EditorInput::PointerClick(position) = &input
+            && position[1] < theme::TAB_BAR_HEIGHT
+        {
+            let position = *position;
+            self.input.reset_pointer();
+            let tab = self
+                .gpu
+                .as_ref()
+                .and_then(|gpu| gpu.tab_at_position(position));
+            if let Some(tab) = tab
+                && self
+                    .gpu
+                    .as_mut()
+                    .is_some_and(|gpu| gpu.switch_document(tab))
+            {
+                self.finish_document_transition();
+            }
+            return;
+        }
+
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -218,6 +238,9 @@ impl Application {
             FileCommand::SaveAs => {
                 self.save_document(true);
             }
+            FileCommand::Close => self.close_active_document(),
+            FileCommand::NextTab => self.cycle_document(1),
+            FileCommand::PreviousTab => self.cycle_document(-1),
         }
     }
 
@@ -242,10 +265,6 @@ impl Application {
             return;
         };
 
-        if !self.confirm_discard_changes() {
-            return;
-        }
-
         let result = self
             .gpu
             .as_mut()
@@ -257,6 +276,72 @@ impl Application {
         }
 
         self.finish_document_transition();
+    }
+
+    fn close_active_document(&mut self) {
+        if !self.confirm_discard_changes() {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.close_active_document();
+        }
+        self.finish_document_transition();
+    }
+
+    fn cycle_document(&mut self, direction: isize) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let count = gpu.document_count();
+        if count < 2 {
+            return;
+        }
+        let active = gpu.active_document_index();
+        let next = (active as isize + direction).rem_euclid(count as isize) as usize;
+        if self
+            .gpu
+            .as_mut()
+            .is_some_and(|gpu| gpu.switch_document(next))
+        {
+            self.finish_document_transition();
+        }
+    }
+
+    fn confirm_close_window(&mut self) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return true;
+        };
+        let original = gpu.active_document_index();
+        let count = gpu.document_count();
+
+        for index in 0..count {
+            let is_dirty = self
+                .gpu
+                .as_ref()
+                .and_then(|gpu| gpu.document_info_at(index))
+                .is_some_and(|info| info.dirty);
+            if !is_dirty {
+                continue;
+            }
+            if self
+                .gpu
+                .as_mut()
+                .is_some_and(|gpu| gpu.switch_document(index))
+            {
+                self.finish_document_transition();
+            }
+            if !self.confirm_discard_changes() {
+                if self
+                    .gpu
+                    .as_mut()
+                    .is_some_and(|gpu| gpu.switch_document(original))
+                {
+                    self.finish_document_transition();
+                }
+                return false;
+            }
+        }
+        true
     }
 
     fn save_document(&mut self, save_as: bool) -> bool {
@@ -402,7 +487,7 @@ impl ApplicationHandler for Application {
 
         match event {
             WindowEvent::CloseRequested => {
-                if self.confirm_discard_changes() {
+                if self.confirm_close_window() {
                     event_loop.exit();
                 }
             }

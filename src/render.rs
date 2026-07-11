@@ -282,8 +282,32 @@ impl Renderer {
         self.documents.active_info()
     }
 
+    pub fn document_info_at(&self, index: usize) -> Option<DocumentInfo> {
+        self.documents.info_at(index)
+    }
+
+    pub fn document_count(&self) -> usize {
+        self.documents.len()
+    }
+
+    pub fn active_document_index(&self) -> usize {
+        self.documents.active_index()
+    }
+
+    pub fn switch_document(&mut self, index: usize) -> bool {
+        self.documents.switch_to(index)
+    }
+
+    pub fn close_active_document(&mut self) {
+        self.documents.close_active();
+    }
+
+    pub fn tab_at_position(&self, position: [f32; 2], viewport_width: f32) -> Option<usize> {
+        tab_at_position(position, viewport_width, self.documents.len())
+    }
+
     pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
-        self.documents.replace_active_from_path(path)
+        self.documents.open_path(path)
     }
 
     pub fn save_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
@@ -302,6 +326,9 @@ impl Renderer {
         scale_factor: f32,
     ) -> Result<(), glyphon::PrepareError> {
         let (logical_width, logical_height) = logical_extent(physical_size, scale_factor);
+        let tab_count = self.documents.len();
+        let active_tab = self.documents.active_index();
+        let tab_width = tab_width(logical_width, tab_count);
         let editor = self.documents.active_editor_mut();
         editor.resize(logical_width, logical_height);
         let layout = editor.layout();
@@ -315,14 +342,33 @@ impl Renderer {
         );
 
         self.scene_rectangles.clear();
+        for index in 0..tab_count {
+            self.scene_rectangles.push(Rectangle::new(
+                [index as f32 * tab_width, 0.0],
+                [tab_width, theme::TAB_BAR_HEIGHT],
+                if index == active_tab {
+                    theme::TAB_ACTIVE_BACKGROUND
+                } else {
+                    theme::TAB_INACTIVE_BACKGROUND
+                },
+            ));
+        }
         self.scene_rectangles.push(Rectangle::new(
-            [0.0, 0.0],
-            [layout.gutter_width, logical_height],
+            [0.0, theme::TAB_BAR_HEIGHT - 1.0],
+            [logical_width, 1.0],
+            theme::TAB_DIVIDER,
+        ));
+        self.scene_rectangles.push(Rectangle::new(
+            [0.0, theme::TAB_BAR_HEIGHT],
+            [
+                layout.gutter_width,
+                (logical_height - theme::TAB_BAR_HEIGHT).max(0.0),
+            ],
             theme::GUTTER_BACKGROUND,
         ));
         self.scene_rectangles.push(Rectangle::new(
-            [layout.gutter_width - 1.0, 0.0],
-            [1.0, logical_height],
+            [layout.gutter_width - 1.0, theme::TAB_BAR_HEIGHT],
+            [1.0, (logical_height - theme::TAB_BAR_HEIGHT).max(0.0)],
             theme::GUTTER_DIVIDER,
         ));
         self.scene_rectangles
@@ -362,7 +408,7 @@ impl Renderer {
         let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
         let editor_left = layout.code_left * scale_factor;
-        let (font_system, swash_cache, line_numbers, code) = editor.render_parts();
+        let (font_system, swash_cache, tab_labels, line_numbers, code) = editor.render_parts();
         let line_number_area = TextArea {
             buffer: line_numbers,
             left: 0.0,
@@ -400,9 +446,34 @@ impl Renderer {
             default_color: theme::CURSOR_TEXT,
             custom_glyphs: &[],
         });
-        let text_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
+        let tab_text_top = (theme::TAB_BAR_HEIGHT - theme::LINE_HEIGHT) * 0.5;
+        let tab_areas = (0..tab_count).map(|index| {
+            let tab_left = index as f32 * tab_width;
+            TextArea {
+                buffer: tab_labels,
+                left: (tab_left + theme::TAB_TEXT_HORIZONTAL_PADDING) * scale_factor,
+                top: (tab_text_top - index as f32 * theme::LINE_HEIGHT) * scale_factor,
+                scale: scale_factor,
+                bounds: TextBounds {
+                    left: (tab_left * scale_factor).round() as i32,
+                    top: 0,
+                    right: ((tab_left + tab_width) * scale_factor)
+                        .round()
+                        .min(physical_width as f32) as i32,
+                    bottom: (theme::TAB_BAR_HEIGHT * scale_factor).round() as i32,
+                },
+                default_color: if index == active_tab {
+                    theme::TAB_ACTIVE_TEXT
+                } else {
+                    theme::TAB_INACTIVE_TEXT
+                },
+                custom_glyphs: &[],
+            }
+        });
+        let editor_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
             .into_iter()
             .flatten();
+        let text_areas = tab_areas.chain(editor_areas);
 
         self.text_renderer.prepare(
             device,
@@ -427,6 +498,26 @@ impl Renderer {
     pub fn finish_frame(&mut self) {
         self.text_atlas.trim();
     }
+}
+
+fn tab_width(viewport_width: f32, tab_count: usize) -> f32 {
+    if tab_count == 0 {
+        return 0.0;
+    }
+    (viewport_width / tab_count as f32).min(theme::MAXIMUM_TAB_WIDTH)
+}
+
+fn tab_at_position(position: [f32; 2], viewport_width: f32, tab_count: usize) -> Option<usize> {
+    if position[0] < 0.0
+        || position[1] < 0.0
+        || position[1] >= theme::TAB_BAR_HEIGHT
+        || tab_count == 0
+    {
+        return None;
+    }
+    let width = tab_width(viewport_width, tab_count);
+    let index = (position[0] / width).floor() as usize;
+    (index < tab_count).then_some(index)
 }
 
 fn logical_extent(physical_size: PhysicalSize<u32>, scale_factor: f32) -> (f32, f32) {
@@ -499,7 +590,10 @@ fn physical_bounds(rectangle: Rectangle, scale_factor: f32) -> TextBounds {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rectangle, RectangleInstance, logical_extent, translate_selection_rectangle};
+    use super::{
+        Rectangle, RectangleInstance, logical_extent, tab_at_position, tab_width,
+        translate_selection_rectangle,
+    };
     use crate::editor::{EditorLayout, SelectionRectangle};
     use winit::dpi::PhysicalSize;
 
@@ -537,5 +631,15 @@ mod tests {
             .expect("selection remains partially visible");
         assert_eq!(rectangle.origin[0], 64.0);
         assert_eq!(rectangle.size[0], 36.0);
+    }
+
+    #[test]
+    fn tabs_share_available_width_and_hit_test_only_the_strip() {
+        assert_eq!(tab_width(960.0, 2), crate::theme::MAXIMUM_TAB_WIDTH);
+        assert_eq!(tab_width(300.0, 3), 100.0);
+        assert_eq!(tab_at_position([50.0, 12.0], 300.0, 3), Some(0));
+        assert_eq!(tab_at_position([250.0, 12.0], 300.0, 3), Some(2));
+        assert_eq!(tab_at_position([50.0, 50.0], 300.0, 3), None);
+        assert_eq!(tab_at_position([450.0, 12.0], 960.0, 2), None);
     }
 }
