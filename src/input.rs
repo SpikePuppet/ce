@@ -36,10 +36,17 @@ pub enum ClipboardCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryCommand {
+    Undo,
+    Redo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     File(FileCommand),
     Editor(EditorCommand),
     Clipboard(ClipboardCommand),
+    History(HistoryCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,8 +134,28 @@ impl InputState {
 fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
     file_command(key, modifiers)
         .map(Command::File)
+        .or_else(|| history_command(key, modifiers).map(Command::History))
         .or_else(|| clipboard_command(key, modifiers).map(Command::Clipboard))
         .or_else(|| editor_command(key, modifiers).map(Command::Editor))
+}
+
+fn history_command(key: &Key, modifiers: ModifiersState) -> Option<HistoryCommand> {
+    if modifiers != ModifiersState::SUPER
+        && modifiers != ModifiersState::SUPER | ModifiersState::SHIFT
+    {
+        return None;
+    }
+
+    let Key::Character(character) = key else {
+        return None;
+    };
+    character
+        .eq_ignore_ascii_case("z")
+        .then_some(if modifiers.shift_key() {
+            HistoryCommand::Redo
+        } else {
+            HistoryCommand::Undo
+        })
 }
 
 fn command_repeats(command: Command) -> bool {
@@ -243,8 +270,8 @@ mod tests {
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     use super::{
-        ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, InputState,
-        command_for_key, file_command, text_input,
+        ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand,
+        InputState, command_for_key, file_command, text_input,
     };
 
     #[test]
@@ -306,6 +333,21 @@ mod tests {
         assert_eq!(
             command_for_key(&Key::Character("v".into()), ModifiersState::SUPER),
             Some(Command::Clipboard(ClipboardCommand::Paste))
+        );
+    }
+
+    #[test]
+    fn macos_history_shortcuts_map_to_undo_and_redo() {
+        assert_eq!(
+            command_for_key(&Key::Character("z".into()), ModifiersState::SUPER),
+            Some(Command::History(HistoryCommand::Undo))
+        );
+        assert_eq!(
+            command_for_key(
+                &Key::Character("z".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(Command::History(HistoryCommand::Redo))
         );
     }
 

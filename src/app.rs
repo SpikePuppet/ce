@@ -16,7 +16,8 @@ use crate::clipboard::SystemClipboard;
 use crate::cursor::CursorBlink;
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
 use crate::input::{
-    ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, InputState, KeyInput,
+    ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand, InputState,
+    KeyInput,
 };
 use crate::theme;
 
@@ -160,6 +161,16 @@ impl Application {
         }
     }
 
+    fn apply_history_command(&mut self, command: HistoryCommand) {
+        let changed = self
+            .gpu
+            .as_mut()
+            .is_some_and(|gpu| gpu.apply_history_command(command));
+        if changed {
+            self.finish_editor_interaction(true);
+        }
+    }
+
     fn finish_editor_interaction(&mut self, document_changed: bool) {
         self.cursor.reset(Instant::now());
         if let Some(gpu) = self.gpu.as_mut() {
@@ -186,6 +197,9 @@ impl Application {
     fn set_cursor_focus(&mut self, focused: bool) {
         if !focused {
             self.input.reset_pointer();
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.break_history_group();
+            }
         }
         self.cursor.set_focused(focused, Instant::now());
 
@@ -212,6 +226,7 @@ impl Application {
             Command::File(command) => self.handle_file_command(command),
             Command::Editor(command) => self.apply_editor_command(command),
             Command::Clipboard(command) => self.apply_clipboard_command(command),
+            Command::History(command) => self.apply_history_command(command),
         }
     }
 

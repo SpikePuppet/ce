@@ -14,7 +14,7 @@ use winit::window::Window;
 
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
-use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
+use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::render::Renderer;
 use crate::theme;
 
@@ -186,6 +186,14 @@ impl GpuState {
 
     pub fn apply_command(&mut self, command: EditorCommand) {
         self.renderer.apply_command(command);
+    }
+
+    pub fn apply_history_command(&mut self, command: HistoryCommand) -> bool {
+        self.renderer.apply_history_command(command)
+    }
+
+    pub fn break_history_group(&mut self) {
+        self.renderer.break_history_group();
     }
 
     pub fn apply_clipboard_command<C: ClipboardProvider>(

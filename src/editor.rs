@@ -1,4 +1,4 @@
-use glyphon::cosmic_text::{Align, BufferRef, Cursor, Motion, Scroll, Selection};
+use glyphon::cosmic_text::{Align, BufferRef, Change, Cursor, Motion, Scroll, Selection};
 use glyphon::{
     Action, Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
@@ -24,6 +24,19 @@ pub struct SelectionRectangle {
 pub struct CursorRectangle {
     pub origin: [f32; 2],
     pub size: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+struct EditorPosition {
+    cursor: Cursor,
+    selection: Selection,
+}
+
+#[derive(Clone)]
+pub struct EditorChange {
+    change: Change,
+    before: EditorPosition,
+    after: EditorPosition,
 }
 
 pub struct EditorState {
@@ -80,7 +93,13 @@ impl EditorState {
         state
     }
 
+    #[cfg(test)]
     pub fn apply_input(&mut self, input: EditorInput) -> bool {
+        self.apply_input_with_change(input).is_some()
+    }
+
+    pub fn apply_input_with_change(&mut self, input: EditorInput) -> Option<EditorChange> {
+        let before = self.position();
         self.editor.start_change();
         match input {
             EditorInput::Action(action) => self.apply_action(action),
@@ -98,17 +117,21 @@ impl EditorState {
                     .action(Action::Drag { x, y });
             }
         }
-        let changed = self
+        let change = self
             .editor
             .finish_change()
-            .is_some_and(|change| !change.items.is_empty());
+            .filter(|change| !change.items.is_empty());
 
         let geometry_changed = self.sync_line_number_text();
         if geometry_changed && let Some((width, height)) = self.logical_size {
             self.resize_buffers(width, height);
         }
         self.shape_and_sync_scroll();
-        changed
+        change.map(|change| EditorChange {
+            change,
+            before,
+            after: self.position(),
+        })
     }
 
     pub fn apply_command(&mut self, command: EditorCommand) {
@@ -124,6 +147,28 @@ impl EditorState {
 
     pub fn selected_text(&self) -> Option<String> {
         self.editor.copy_selection()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.editor.selection() != Selection::None
+    }
+
+    pub fn apply_history_change(&mut self, record: &EditorChange, undo: bool) {
+        let mut change = record.change.clone();
+        let position = if undo {
+            change.reverse();
+            record.before
+        } else {
+            record.after
+        };
+        let applied = self.editor.apply_change(&change);
+        debug_assert!(applied, "history changes must not overlap pending edits");
+        self.editor.set_cursor(position.cursor);
+        self.editor.set_selection(position.selection);
+    }
+
+    pub fn finish_history_transaction(&mut self) {
+        self.sync_after_change();
     }
 
     pub fn text(&self) -> String {
@@ -189,6 +234,21 @@ impl EditorState {
         self.editor.with_buffer_mut(|buffer| {
             buffer.set_size(Some(code_width), Some(content_height));
         });
+    }
+
+    fn position(&self) -> EditorPosition {
+        EditorPosition {
+            cursor: self.editor.cursor(),
+            selection: self.editor.selection(),
+        }
+    }
+
+    fn sync_after_change(&mut self) {
+        let geometry_changed = self.sync_line_number_text();
+        if geometry_changed && let Some((width, height)) = self.logical_size {
+            self.resize_buffers(width, height);
+        }
+        self.shape_and_sync_scroll();
     }
 
     fn apply_action(&mut self, action: Action) {
@@ -419,6 +479,25 @@ mod tests {
         let editor = EditorState::with_text(source);
 
         assert_eq!(editor.text(), source);
+    }
+
+    #[test]
+    fn history_changes_resynchronize_line_numbers() {
+        let mut editor = EditorState::new();
+        let change = editor
+            .apply_input_with_change(EditorInput::InsertText("one\ntwo".to_owned()))
+            .expect("multiline insertion creates a change");
+        assert_eq!(editor.line_count, 2);
+
+        editor.apply_history_change(&change, true);
+        editor.finish_history_transaction();
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.line_count, 1);
+
+        editor.apply_history_change(&change, false);
+        editor.finish_history_transaction();
+        assert_eq!(editor.text(), "one\ntwo");
+        assert_eq!(editor.line_count, 2);
     }
 
     #[test]

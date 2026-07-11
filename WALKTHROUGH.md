@@ -21,8 +21,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | Milestone | Status |
 | --- | --- |
 | 7: File lifecycle | Approved and committed (`883d365`) |
-| 8: Commands, selection, and clipboard | Implemented; awaiting review |
-| 9: Undo and redo | Planned |
+| 8: Commands, selection, and clipboard | Approved and committed (`72dc051`) |
+| 9: Undo and redo | Implemented; awaiting review |
 | 10: Tabs | Planned |
 | 11: Python syntax highlighting | Planned |
 | 12: Python LSP diagnostics | Planned |
@@ -125,6 +125,18 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - The production clipboard uses text-only `arboard` features, avoiding image codecs and persistent polling; behavioral tests use an in-memory provider.
 - Formatting, compilation, Clippy with denied warnings, forty-one tests, and the optimized release build pass.
 
+### Milestone 9 review record
+
+- Every recorded edit stores the reversible `cosmic-text` change plus cursor and selection state from before and after it.
+- Per-document history owns an applied position, redo tail, saved pivot, and current coalescing group.
+- Consecutive single-character typing within 750 ms coalesces into one transaction; a pause starts another, and consecutive Backspace operations form a separate transaction.
+- Newlines, indentation, IME commits, selection replacement, cut, and paste are standalone transactions.
+- Cursor motion, selection changes, pointer interaction, clipboard commands, saving, focus loss, undo, and redo close the current group.
+- Undo applies grouped changes in reverse order, redo applies them forward, and both perform one final layout/line-number synchronization.
+- Editing after undo truncates the redo branch; if that branch contained the saved pivot, the saved state is correctly marked unreachable.
+- Dirty state is derived from whether the current history position equals the saved pivot, so undoing back to disk clears the native edited indicator and moving past it marks the document dirty again.
+- Formatting, compilation, Clippy with denied warnings, forty-nine tests, and the optimized release build pass.
+
 ## Phase 2 product brief
 
 Phase 2 turns the scratch editor into a small Python-focused working editor. Its document model grows into tabs, its input mapping grows into standard macOS editing commands, and language intelligence is layered in locally with Tree-sitter and externally through LSP.
@@ -215,6 +227,25 @@ Compare keyboard behavior with standard macOS editors, including Unicode word bo
 - Store reversible `cosmic-text` changes in per-document history.
 - Coalesce continuous typing into useful transactions and break groups at movement, selection, paste, newline, deletion-mode changes, or focus changes.
 - Track a saved-history pivot so undoing to the on-disk version clears dirty state.
+
+### Rust concepts
+
+- Command history as a cursor into an immutable prefix plus a replaceable redo tail
+- Coalescing fine-grained mutations into user-visible transactions
+- Restoring interaction state alongside model data
+- Deriving dirty state from history identity rather than mutating a boolean
+- Applying several model changes before one derived-layout synchronization
+
+### Verify
+
+- One Cmd+Z removes a continuous typing run and Cmd+Shift+Z restores it.
+- Repeated Backspace undoes as one run, separately from preceding typing.
+- Enter, Tab, paste, cut, and selection replacement undo independently.
+- Movement or selection between edits prevents those edits from coalescing.
+- Undo restores the prior cursor and selection, not only the prior text.
+- Undo and redo update line numbers, cursor visibility, scroll, and the native dirty indicator.
+- Saving establishes a clean pivot; undoing before it is dirty, redoing to it is clean, and moving past it is dirty.
+- Typing after undo makes the abandoned redo branch unavailable.
 
 ### Review checkpoint
 

@@ -16,7 +16,7 @@ use winit::dpi::PhysicalSize;
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
 use crate::editor::{CursorRectangle, EditorLayout, SelectionRectangle};
-use crate::input::{ClipboardCommand, EditorCommand, EditorInput};
+use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -260,6 +260,14 @@ impl Renderer {
 
     pub fn apply_command(&mut self, command: EditorCommand) {
         self.documents.apply_command(command);
+    }
+
+    pub fn apply_history_command(&mut self, command: HistoryCommand) -> bool {
+        self.documents.apply_history_command(command)
+    }
+
+    pub fn break_history_group(&mut self) {
+        self.documents.break_history_group();
     }
 
     pub fn apply_clipboard_command<C: ClipboardProvider>(
