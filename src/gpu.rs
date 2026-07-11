@@ -178,6 +178,10 @@ impl GpuState {
         self.renderer.apply_input(input);
     }
 
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.renderer.set_cursor_visible(visible);
+    }
+
     pub fn render(&mut self) -> Result<RenderOutcome, GpuError> {
         if !self.surface_is_configured {
             return Ok(RenderOutcome::Skipped);

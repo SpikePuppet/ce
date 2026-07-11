@@ -411,6 +411,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "pollster",
+ "unicode-segmentation",
  "wgpu",
  "winit",
 ]

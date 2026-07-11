@@ -13,7 +13,7 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
-use crate::editor::{EditorLayout, EditorState, SelectionRectangle};
+use crate::editor::{CursorRectangle, EditorLayout, EditorState, SelectionRectangle};
 use crate::input::EditorInput;
 use crate::theme;
 
@@ -229,6 +229,7 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     editor: EditorState,
     scene_rectangles: Vec<Rectangle>,
+    cursor_visible: bool,
 }
 
 impl Renderer {
@@ -247,11 +248,16 @@ impl Renderer {
             text_renderer,
             editor: EditorState::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
+            cursor_visible: false,
         }
     }
 
     pub fn apply_input(&mut self, input: EditorInput) {
         self.editor.apply_input(input);
+    }
+
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.cursor_visible = visible;
     }
 
     pub fn prepare(
@@ -298,6 +304,16 @@ impl Renderer {
                         )
                     }),
             );
+        let cursor_rectangle = self
+            .cursor_visible
+            .then(|| self.editor.cursor_rectangle())
+            .flatten()
+            .and_then(|rectangle| {
+                translate_cursor_rectangle(rectangle, layout, logical_width, logical_height)
+            });
+        if let Some(rectangle) = cursor_rectangle {
+            self.scene_rectangles.push(rectangle);
+        }
         self.rectangles.prepare(
             device,
             queue,
@@ -312,36 +328,46 @@ impl Renderer {
         let content_top = theme::CONTENT_TOP * scale_factor;
         let editor_left = layout.code_left * scale_factor;
         let (font_system, swash_cache, line_numbers, code) = self.editor.render_parts();
-        let text_areas = [
-            TextArea {
-                buffer: line_numbers,
-                left: 0.0,
-                top: content_top,
-                scale: scale_factor,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: gutter_right,
-                    bottom: physical_height,
-                },
-                default_color: theme::LINE_NUMBER_TEXT,
-                custom_glyphs: &[],
+        let line_number_area = TextArea {
+            buffer: line_numbers,
+            left: 0.0,
+            top: content_top,
+            scale: scale_factor,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right: gutter_right,
+                bottom: physical_height,
             },
-            TextArea {
-                buffer: code,
-                left: editor_left,
-                top: content_top,
-                scale: scale_factor,
-                bounds: TextBounds {
-                    left: gutter_right,
-                    top: 0,
-                    right: physical_width,
-                    bottom: physical_height,
-                },
-                default_color: theme::EDITOR_TEXT,
-                custom_glyphs: &[],
+            default_color: theme::LINE_NUMBER_TEXT,
+            custom_glyphs: &[],
+        };
+        let code_area = TextArea {
+            buffer: code,
+            left: editor_left,
+            top: content_top,
+            scale: scale_factor,
+            bounds: TextBounds {
+                left: gutter_right,
+                top: 0,
+                right: physical_width,
+                bottom: physical_height,
             },
-        ];
+            default_color: theme::EDITOR_TEXT,
+            custom_glyphs: &[],
+        };
+        let cursor_text_area = cursor_rectangle.map(|rectangle| TextArea {
+            buffer: code,
+            left: editor_left,
+            top: content_top,
+            scale: scale_factor,
+            bounds: physical_bounds(rectangle, scale_factor),
+            default_color: theme::CURSOR_TEXT,
+            custom_glyphs: &[],
+        });
+        let text_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
+            .into_iter()
+            .flatten();
 
         self.text_renderer.prepare(
             device,
@@ -381,17 +407,59 @@ fn translate_selection_rectangle(
     viewport_width: f32,
     viewport_height: f32,
 ) -> Option<Rectangle> {
-    let left = (layout.code_left + selection.origin[0]).max(layout.gutter_width);
-    let top = (theme::CONTENT_TOP + selection.origin[1]).max(0.0);
-    let right = (layout.code_left + selection.origin[0] + selection.size[0]).min(viewport_width);
-    let bottom =
-        (theme::CONTENT_TOP + selection.origin[1] + selection.size[1]).min(viewport_height);
+    translate_editor_rectangle(
+        selection.origin,
+        selection.size,
+        layout,
+        viewport_width,
+        viewport_height,
+        theme::SELECTION_BACKGROUND,
+    )
+}
+
+fn translate_cursor_rectangle(
+    cursor: CursorRectangle,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Option<Rectangle> {
+    translate_editor_rectangle(
+        cursor.origin,
+        cursor.size,
+        layout,
+        viewport_width,
+        viewport_height,
+        theme::CURSOR_BACKGROUND,
+    )
+}
+
+fn translate_editor_rectangle(
+    origin: [f32; 2],
+    size: [f32; 2],
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+    color: [f32; 4],
+) -> Option<Rectangle> {
+    let left = (layout.code_left + origin[0]).max(layout.gutter_width);
+    let top = (theme::CONTENT_TOP + origin[1]).max(0.0);
+    let right = (layout.code_left + origin[0] + size[0]).min(viewport_width);
+    let bottom = (theme::CONTENT_TOP + origin[1] + size[1]).min(viewport_height);
 
     (right > left && bottom > top).then_some(Rectangle::new(
         [left, top],
         [right - left, bottom - top],
-        theme::SELECTION_BACKGROUND,
+        color,
     ))
+}
+
+fn physical_bounds(rectangle: Rectangle, scale_factor: f32) -> TextBounds {
+    TextBounds {
+        left: (rectangle.origin[0] * scale_factor).floor() as i32,
+        top: (rectangle.origin[1] * scale_factor).floor() as i32,
+        right: ((rectangle.origin[0] + rectangle.size[0]) * scale_factor).ceil() as i32,
+        bottom: ((rectangle.origin[1] + rectangle.size[1]) * scale_factor).ceil() as i32,
+    }
 }
 
 #[cfg(test)]

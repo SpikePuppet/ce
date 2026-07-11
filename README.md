@@ -6,7 +6,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 ## Current state
 
-Milestone 4 is implemented: the scratch buffer supports click placement and bidirectional, multiline mouse selection in addition to keyboard editing, generated line numbers, and automatic cursor-following scroll. A visible cursor arrives in the next milestone.
+Milestone 5 is implemented: the scratch buffer now has a focused, blinking block insertion cursor in addition to keyboard editing, click placement, bidirectional multiline selection, generated line numbers, and automatic cursor-following scroll.
 
 ```bash
 cargo run

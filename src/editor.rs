@@ -2,6 +2,7 @@ use glyphon::cosmic_text::{Align, BufferRef, Motion, Scroll, Selection};
 use glyphon::{
     Action, Attrs, Buffer, Edit, Editor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::input::EditorInput;
 use crate::theme;
@@ -19,6 +20,12 @@ pub struct SelectionRectangle {
     pub size: [f32; 2],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorRectangle {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+}
+
 pub struct EditorState {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -28,6 +35,7 @@ pub struct EditorState {
     gutter_width: f32,
     logical_size: Option<(f32, f32)>,
     selection_rectangles: Vec<SelectionRectangle>,
+    cursor_rectangle: Option<CursorRectangle>,
 }
 
 impl EditorState {
@@ -58,6 +66,7 @@ impl EditorState {
             gutter_width: gutter_width_for_line_count(1),
             logical_size: None,
             selection_rectangles: Vec::new(),
+            cursor_rectangle: None,
         }
     }
 
@@ -107,6 +116,10 @@ impl EditorState {
 
     pub fn selection_rectangles(&self) -> &[SelectionRectangle] {
         &self.selection_rectangles
+    }
+
+    pub fn cursor_rectangle(&self) -> Option<CursorRectangle> {
+        self.cursor_rectangle
     }
 
     pub fn render_parts(&mut self) -> (&mut FontSystem, &mut SwashCache, &Buffer, &Buffer) {
@@ -202,6 +215,7 @@ impl EditorState {
         self.line_numbers
             .shape_until_scroll(&mut self.font_system, false);
         self.rebuild_selection_rectangles();
+        self.rebuild_cursor_rectangle();
     }
 
     fn editor_coordinates(&self, window_position: [f32; 2]) -> (i32, i32) {
@@ -255,6 +269,35 @@ impl EditorState {
                     }
                 }
             }
+        });
+    }
+
+    fn rebuild_cursor_rectangle(&mut self) {
+        let cursor = self.editor.cursor();
+        self.cursor_rectangle = self.editor.with_buffer(|buffer| {
+            let fallback_width = buffer
+                .monospace_width()
+                .unwrap_or(theme::APPROXIMATE_CELL_WIDTH);
+
+            buffer.layout_runs().find_map(|run| {
+                let (glyph_index, _) = run.cursor_glyph(&cursor)?;
+                let cursor_x = run.cursor_position(&cursor)?;
+                let glyph = run.glyphs.get(glyph_index).or_else(|| run.glyphs.last());
+                let cell_width = glyph.map_or(fallback_width, |glyph| {
+                    let grapheme_count = run.text[glyph.start..glyph.end]
+                        .graphemes(true)
+                        .count()
+                        .max(1);
+                    glyph.w / grapheme_count as f32
+                });
+                let rtl = glyph.map_or(run.rtl, |glyph| glyph.level.is_rtl());
+                let left = if rtl { cursor_x - cell_width } else { cursor_x };
+
+                Some(CursorRectangle {
+                    origin: [left, run.line_top],
+                    size: [cell_width, run.line_height],
+                })
+            })
         });
     }
 }
@@ -410,6 +453,35 @@ mod tests {
 
         assert_eq!(editor.editor.selection(), Selection::None);
         assert_eq!(editor.editor.cursor(), Cursor::new(0, 4));
+    }
+
+    #[test]
+    fn empty_line_cursor_uses_one_fallback_character_cell() {
+        let mut editor = EditorState::new();
+        editor.resize(400.0, 200.0);
+
+        let cursor = editor
+            .cursor_rectangle()
+            .expect("empty line has a cursor rectangle");
+        assert_eq!(cursor.origin, [0.0, 0.0]);
+        assert_eq!(cursor.size[0], crate::theme::APPROXIMATE_CELL_WIDTH);
+        assert_eq!(cursor.size[1], crate::theme::LINE_HEIGHT);
+    }
+
+    #[test]
+    fn cursor_uses_shaped_character_advance_and_follows_motion() {
+        let mut editor = EditorState::new();
+        editor.resize(400.0, 200.0);
+        editor.apply_input(EditorInput::InsertText("ab".to_owned()));
+
+        let end_cursor = editor.cursor_rectangle().expect("cursor at line end");
+        assert!(end_cursor.origin[0] > 0.0);
+        assert!(end_cursor.size[0] > 0.0);
+
+        editor.apply_input(EditorInput::Action(Action::Motion(Motion::Left)));
+        let moved_cursor = editor.cursor_rectangle().expect("cursor after motion");
+        assert!(moved_cursor.origin[0] < end_cursor.origin[0]);
+        assert_eq!(moved_cursor.size[0], end_cursor.size[0]);
     }
 
     fn code_text(editor: &EditorState) -> String {

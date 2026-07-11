@@ -1,14 +1,16 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
-use winit::event::{Ime, WindowEvent};
+use winit::event::{Ime, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use crate::cursor::CursorBlink;
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
 use crate::input::{EditorInput, InputState};
 use crate::theme;
@@ -72,6 +74,7 @@ pub fn run() -> Result<(), AppError> {
 struct Application {
     gpu: Option<GpuState>,
     input: InputState,
+    cursor: CursorBlink,
     failure: Option<AppError>,
 }
 
@@ -85,10 +88,13 @@ impl Application {
             ))
             .with_visible(false);
         let window = Arc::new(event_loop.create_window(window_attributes)?);
-        let gpu = pollster::block_on(GpuState::new(window, event_loop))?;
+        let mut gpu = pollster::block_on(GpuState::new(window, event_loop))?;
 
         gpu.window().set_ime_allowed(true);
         gpu.window().set_visible(true);
+        self.cursor
+            .set_focused(gpu.window().has_focus(), Instant::now());
+        gpu.set_cursor_visible(self.cursor.is_visible());
         gpu.window().request_redraw();
         self.gpu = Some(gpu);
         Ok(())
@@ -119,11 +125,40 @@ impl Application {
         };
 
         gpu.apply_input(input);
+        self.cursor.reset(Instant::now());
+        gpu.set_cursor_visible(self.cursor.is_visible());
         gpu.window().request_redraw();
+    }
+
+    fn update_cursor_blink(&mut self, now: Instant) {
+        if !self.cursor.tick(now) {
+            return;
+        }
+
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.window().request_redraw();
+        }
+    }
+
+    fn set_cursor_focus(&mut self, focused: bool) {
+        if !focused {
+            self.input.cancel_pointer_drag();
+        }
+        self.cursor.set_focused(focused, Instant::now());
+
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.window().request_redraw();
+        }
     }
 }
 
 impl ApplicationHandler for Application {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+        self.update_cursor_blink(Instant::now());
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(gpu) = &self.gpu {
             gpu.window().request_redraw();
@@ -182,7 +217,7 @@ impl ApplicationHandler for Application {
                     self.apply_input(input);
                 }
             }
-            WindowEvent::Focused(false) => self.input.cancel_pointer_drag(),
+            WindowEvent::Focused(focused) => self.set_cursor_focus(focused),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(input) = self.input.handle_key_event(&event) {
                     self.apply_input(input);
@@ -193,6 +228,13 @@ impl ApplicationHandler for Application {
             }
             WindowEvent::RedrawRequested => self.render_frame(event_loop),
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        match self.cursor.next_deadline() {
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

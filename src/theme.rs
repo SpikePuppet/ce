@@ -13,8 +13,10 @@ pub const EDITOR_BACKGROUND: wgpu::Color = wgpu::Color {
 pub const GUTTER_BACKGROUND: [f32; 4] = [0.009_134_059, 0.009_134_059, 0.009_134_059, 1.0];
 pub const GUTTER_DIVIDER: [f32; 4] = [0.024_157_632, 0.024_157_632, 0.024_157_632, 1.0];
 pub const SELECTION_BACKGROUND: [f32; 4] = [0.019_382_361, 0.078_187_42, 0.187_820_78, 1.0];
+pub const CURSOR_BACKGROUND: [f32; 4] = [0.093_058_96, 0.332_451_55, 0.672_443_15, 1.0];
 pub const EDITOR_TEXT: glyphon::Color = glyphon::Color::rgb(212, 212, 212);
 pub const LINE_NUMBER_TEXT: glyphon::Color = glyphon::Color::rgb(133, 133, 133);
+pub const CURSOR_TEXT: glyphon::Color = glyphon::Color::rgb(30, 30, 30);
 
 pub const FONT_FAMILY: &str = "Menlo";
 pub const FONT_SIZE: f32 = 15.0;
