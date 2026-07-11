@@ -6,6 +6,7 @@ use glyphon::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::input::{EditorCommand, EditorInput};
+use crate::lsp::DiagnosticSeverity;
 use crate::syntax::{HighlightKind, HighlightSpan};
 use crate::theme;
 
@@ -26,6 +27,26 @@ pub struct SelectionRectangle {
 pub struct CursorRectangle {
     pub origin: [f32; 2],
     pub size: [f32; 2],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticSpan {
+    pub range: std::ops::Range<usize>,
+    pub severity: DiagnosticSeverity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiagnosticRectangle {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub color: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+struct PositionedDiagnostic {
+    start: Cursor,
+    end: Cursor,
+    severity: DiagnosticSeverity,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +83,8 @@ pub struct EditorState {
     gutter_width: f32,
     logical_size: Option<(f32, f32)>,
     selection_rectangles: Vec<SelectionRectangle>,
+    diagnostics: Vec<PositionedDiagnostic>,
+    diagnostic_rectangles: Vec<DiagnosticRectangle>,
     cursor_rectangle: Option<CursorRectangle>,
 }
 
@@ -99,6 +122,8 @@ impl EditorState {
             gutter_width: gutter_width_for_line_count(1),
             logical_size: None,
             selection_rectangles: Vec::new(),
+            diagnostics: Vec::new(),
+            diagnostic_rectangles: Vec::new(),
             cursor_rectangle: None,
         }
     }
@@ -264,6 +289,29 @@ impl EditorState {
         &self.selection_rectangles
     }
 
+    pub fn diagnostic_rectangles(&self) -> &[DiagnosticRectangle] {
+        &self.diagnostic_rectangles
+    }
+
+    pub fn set_diagnostics(&mut self, spans: &[DiagnosticSpan]) {
+        self.diagnostics = self.editor.with_buffer(|buffer| {
+            spans
+                .iter()
+                .map(|span| PositionedDiagnostic {
+                    start: cursor_for_byte_offset(buffer, span.range.start),
+                    end: cursor_for_byte_offset(buffer, span.range.end),
+                    severity: span.severity,
+                })
+                .collect()
+        });
+        self.rebuild_diagnostic_rectangles();
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics.clear();
+        self.diagnostic_rectangles.clear();
+    }
+
     pub fn cursor_rectangle(&self) -> Option<CursorRectangle> {
         self.cursor_rectangle
     }
@@ -403,6 +451,7 @@ impl EditorState {
         self.line_numbers
             .shape_until_scroll(&mut self.font_system, false);
         self.rebuild_selection_rectangles();
+        self.rebuild_diagnostic_rectangles();
         self.rebuild_cursor_rectangle();
     }
 
@@ -487,6 +536,69 @@ impl EditorState {
             })
         });
     }
+
+    fn rebuild_diagnostic_rectangles(&mut self) {
+        self.diagnostic_rectangles.clear();
+        let diagnostics = &self.diagnostics;
+        let rectangles = &mut self.diagnostic_rectangles;
+        self.editor.with_buffer(|buffer| {
+            let fallback_width = buffer
+                .monospace_width()
+                .unwrap_or(theme::APPROXIMATE_CELL_WIDTH);
+            for diagnostic in diagnostics {
+                for run in buffer.layout_runs() {
+                    if run.line_i < diagnostic.start.line || run.line_i > diagnostic.end.line {
+                        continue;
+                    }
+                    let mut highlights = run.highlight(diagnostic.start, diagnostic.end).peekable();
+                    if highlights.peek().is_none() && diagnostic.start == diagnostic.end {
+                        if let Some(x) = run.cursor_position(&diagnostic.start) {
+                            rectangles.push(DiagnosticRectangle {
+                                origin: [x, run.line_top + run.line_height - 2.0],
+                                size: [fallback_width, 2.0],
+                                color: diagnostic_color(diagnostic.severity),
+                            });
+                        }
+                        continue;
+                    }
+                    for (x, width) in highlights {
+                        if width > 0.0 {
+                            rectangles.push(DiagnosticRectangle {
+                                origin: [x, run.line_top + run.line_height - 2.0],
+                                size: [width, 2.0],
+                                color: diagnostic_color(diagnostic.severity),
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn cursor_for_byte_offset(buffer: &Buffer, offset: usize) -> Cursor {
+    let mut absolute = 0;
+    for (line_index, line) in buffer.lines.iter().enumerate() {
+        let line_end = absolute + line.text().len();
+        if offset <= line_end {
+            return Cursor::new(
+                line_index,
+                offset.saturating_sub(absolute).min(line.text().len()),
+            );
+        }
+        absolute = line_end + line.ending().as_str().len();
+    }
+    let line = buffer.lines.len().saturating_sub(1);
+    Cursor::new(line, buffer.lines[line].text().len())
+}
+
+fn diagnostic_color(severity: DiagnosticSeverity) -> [f32; 4] {
+    match severity {
+        DiagnosticSeverity::Error => theme::DIAGNOSTIC_ERROR,
+        DiagnosticSeverity::Warning => theme::DIAGNOSTIC_WARNING,
+        DiagnosticSeverity::Information => theme::DIAGNOSTIC_INFORMATION,
+        DiagnosticSeverity::Hint => theme::DIAGNOSTIC_HINT,
+    }
 }
 
 fn text_attributes() -> Attrs<'static> {
@@ -521,8 +633,9 @@ mod tests {
     use glyphon::cosmic_text::{Cursor, Motion, Selection};
     use glyphon::{Action, Buffer, Edit};
 
-    use super::{EditorState, gutter_width_for_line_count};
+    use super::{DiagnosticSpan, EditorState, gutter_width_for_line_count};
     use crate::input::{EditorCommand, EditorInput};
+    use crate::lsp::DiagnosticSeverity;
     use crate::syntax::{HighlightKind, HighlightSpan};
 
     #[test]
@@ -602,6 +715,27 @@ mod tests {
                 Some(crate::theme::SYNTAX_STRING)
             );
         });
+    }
+
+    #[test]
+    fn diagnostics_create_colored_underlines_and_can_be_cleared() {
+        let mut editor = EditorState::with_text("missing_name");
+        editor.resize(400.0, 200.0);
+        editor.set_diagnostics(&[DiagnosticSpan {
+            range: 0..12,
+            severity: DiagnosticSeverity::Error,
+        }]);
+
+        assert!(!editor.diagnostic_rectangles().is_empty());
+        assert!(
+            editor
+                .diagnostic_rectangles()
+                .iter()
+                .all(|rectangle| rectangle.color == crate::theme::DIAGNOSTIC_ERROR)
+        );
+
+        editor.clear_diagnostics();
+        assert!(editor.diagnostic_rectangles().is_empty());
     }
 
     #[test]

@@ -15,8 +15,9 @@ use winit::dpi::PhysicalSize;
 
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
-use crate::editor::{CursorRectangle, EditorLayout, SelectionRectangle};
+use crate::editor::{CursorRectangle, DiagnosticRectangle, EditorLayout, SelectionRectangle};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
+use crate::lsp::{DiagnosticUpdate, LspDocument};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -314,6 +315,18 @@ impl Renderer {
         self.documents.save_active_as(path)
     }
 
+    pub fn lsp_documents(&self) -> Vec<LspDocument> {
+        self.documents.lsp_documents()
+    }
+
+    pub fn apply_diagnostics(&mut self, update: &DiagnosticUpdate) -> bool {
+        self.documents.apply_diagnostics(update)
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        self.documents.clear_diagnostics();
+    }
+
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
     }
@@ -378,6 +391,20 @@ impl Renderer {
                     .iter()
                     .filter_map(|rectangle| {
                         translate_selection_rectangle(
+                            *rectangle,
+                            layout,
+                            logical_width,
+                            logical_height,
+                        )
+                    }),
+            );
+        self.scene_rectangles
+            .extend(
+                editor
+                    .diagnostic_rectangles()
+                    .iter()
+                    .filter_map(|rectangle| {
+                        translate_diagnostic_rectangle(
                             *rectangle,
                             layout,
                             logical_width,
@@ -556,6 +583,22 @@ fn translate_cursor_rectangle(
         viewport_width,
         viewport_height,
         theme::CURSOR_BACKGROUND,
+    )
+}
+
+fn translate_diagnostic_rectangle(
+    diagnostic: DiagnosticRectangle,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Option<Rectangle> {
+    translate_editor_rectangle(
+        diagnostic.origin,
+        diagnostic.size,
+        layout,
+        viewport_width,
+        viewport_height,
+        diagnostic.color,
     )
 }
 

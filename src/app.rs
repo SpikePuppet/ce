@@ -8,7 +8,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
 use winit::event::{StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::platform::macos::WindowExtMacOS;
 use winit::window::{Window, WindowId};
 
@@ -19,6 +19,7 @@ use crate::input::{
     ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand, InputState,
     KeyInput,
 };
+use crate::lsp::{LspEvent, LspManager};
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -71,25 +72,38 @@ impl From<GpuError> for AppError {
 }
 
 pub fn run() -> Result<(), AppError> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<LspEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut application = Application::default();
+    let mut application = Application::new(event_loop.create_proxy());
     event_loop.run_app(&mut application)?;
 
     application.failure.map_or(Ok(()), Err)
 }
 
-#[derive(Default)]
 struct Application {
     gpu: Option<GpuState>,
     clipboard: SystemClipboard,
     input: InputState,
     cursor: CursorBlink,
     failure: Option<AppError>,
+    lsp: LspManager,
+    lsp_error_shown: bool,
 }
 
 impl Application {
+    fn new(proxy: EventLoopProxy<LspEvent>) -> Self {
+        Self {
+            gpu: None,
+            clipboard: SystemClipboard::default(),
+            input: InputState::default(),
+            cursor: CursorBlink::default(),
+            failure: None,
+            lsp: LspManager::new(proxy),
+            lsp_error_shown: false,
+        }
+    }
+
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), AppError> {
         let window_attributes = Window::default_attributes()
             .with_title(theme::WINDOW_TITLE)
@@ -200,6 +214,7 @@ impl Application {
 
         if document_changed {
             self.sync_window_document_state();
+            self.sync_lsp_documents();
         }
     }
 
@@ -383,6 +398,10 @@ impl Application {
         }
 
         self.sync_window_document_state();
+        self.sync_lsp_documents();
+        if let Some(path) = self.gpu.as_ref().and_then(|gpu| gpu.document_info().path) {
+            self.lsp.did_save(&path);
+        }
         true
     }
 
@@ -443,6 +462,7 @@ impl Application {
             gpu.window().request_redraw();
         }
         self.sync_window_document_state();
+        self.sync_lsp_documents();
     }
 
     fn sync_window_document_state(&self) {
@@ -454,9 +474,21 @@ impl Application {
             .set_title(&format!("{} — {}", info.display_name, theme::WINDOW_TITLE));
         gpu.window().set_document_edited(info.dirty);
     }
+
+    fn sync_lsp_documents(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        if let Err(error) = self.lsp.reconcile(gpu.lsp_documents())
+            && !self.lsp_error_shown
+        {
+            self.lsp_error_shown = true;
+            self.show_file_error("Python Diagnostics Unavailable", &error.to_string());
+        }
+    }
 }
 
-impl ApplicationHandler for Application {
+impl ApplicationHandler<LspEvent> for Application {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         self.update_cursor_blink(Instant::now());
     }
@@ -547,6 +579,25 @@ impl ApplicationHandler for Application {
         match self.cursor.next_deadline() {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: LspEvent) {
+        let server_stopped = matches!(&event, LspEvent::ServerStopped(_));
+        let Some(update) = self.lsp.handle_event(event) else {
+            if server_stopped && let Some(gpu) = self.gpu.as_mut() {
+                gpu.clear_diagnostics();
+                gpu.window().request_redraw();
+            }
+            return;
+        };
+        if self
+            .gpu
+            .as_mut()
+            .is_some_and(|gpu| gpu.apply_diagnostics(&update))
+            && let Some(gpu) = self.gpu.as_ref()
+        {
+            gpu.window().request_redraw();
         }
     }
 }

@@ -24,8 +24,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 8: Commands, selection, and clipboard | Approved and committed (`72dc051`) |
 | 9: Undo and redo | Approved and committed (`f2396e4`) |
 | 10: Tabs | Approved and committed (`152f1ad`) |
-| 11: Python syntax highlighting | Implemented; awaiting review |
-| 12: Python LSP diagnostics | Planned |
+| 11: Python syntax highlighting | Approved and committed (`b31a117`) |
+| 12: Python LSP diagnostics | Implemented; awaiting review |
 | 13: Interactive LSP features | Planned |
 
 ### Milestone 1 review record
@@ -159,6 +159,19 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Saving an untitled or plain document as `.py` enables highlighting immediately; Save As to a non-Python extension removes syntax attributes and parser state.
 - Parser and query state live per document, so switching tabs preserves each Python syntax tree without reparsing inactive files.
 - Formatting, compilation, Clippy with denied warnings, fifty-eight tests, and the optimized release build pass.
+
+### Milestone 12 review record
+
+- `LspManager` discovers `pyright-langserver` through `PATH`, starts it only when a named Python document exists, and reports one clear native error without preventing ordinary editing when Pyright is unavailable.
+- A writer thread and reader thread own the server's stdio pipes; `Content-Length` framing carries JSON-RPC messages without blocking the macOS event loop.
+- Initialization uses the nearest `pyrightconfig.json`, `pyproject.toml`, or Git root, falling back to the Python file's directory.
+- Every open `.py` and `.pyi` tab is synchronized with `didOpen`, full-document versioned `didChange`, `didSave`, and `didClose` notifications.
+- Full-document synchronization is deliberate for this first protocol milestone: it keeps the client correct and inspectable while Tree-sitter remains incremental on the local editing path.
+- Background diagnostics return through a typed `winit` user event; versioned results that do not match the latest synchronized document are discarded.
+- LSP UTF-16 line/character positions are converted to UTF-8 byte offsets at Unicode scalar boundaries, including safe handling of surrogate-pair positions and CRLF content.
+- Error, warning, information, and hint ranges become clipped GPU underline rectangles; any edit clears prior geometry until a fresh diagnostic publication arrives.
+- Shutdown sends `shutdown`, waits briefly for its response, sends `exit`, and only force-terminates the child if it does not exit within the bounded grace period.
+- Formatting, compilation, Clippy with denied warnings, sixty-five tests, and the optimized release build pass. Live Pyright verification remains pending because `pyright-langserver` is not installed on the development machine.
 
 ## Phase 2 product brief
 
@@ -351,6 +364,27 @@ Review incomplete and invalid Python as actively as valid examples; highlighting
 - Deliver background events safely into the native event loop.
 - Render diagnostic severity and ranges and shut the server down cleanly.
 
+The first implementation uses full-document `didChange` notifications. This is a useful learning boundary: protocol correctness, versioning, UTF-16 conversion, and process supervision are visible without also introducing an incremental LSP change generator. Tree-sitter still receives incremental edits for immediate local highlighting.
+
+### Rust concepts
+
+- Moving owned child-process pipes onto dedicated reader and writer threads
+- Channels as boundaries between blocking I/O and the native event loop
+- JSON-RPC message framing and request/notification lifecycle
+- Versioned asynchronous results and stale-result rejection
+- Translating UTF-16 protocol coordinates into UTF-8 Rust string indices
+- Bounded graceful shutdown with an owned child process
+
+### Verify
+
+- Without `pyright-langserver` on `PATH`, opening a Python file reports that diagnostics are unavailable and editing continues normally.
+- With Pyright installed, opening a Python file starts one server and displays severity-colored underlines.
+- Edits, undo, redo, paste, save, tab close, and Save As produce the appropriate synchronization notifications.
+- Diagnostics from an older document version cannot replace current geometry.
+- Emoji and other non-BMP characters before a diagnostic do not shift the underline.
+- Project markers choose the expected initialization root.
+- Closing the editor completes the LSP shutdown handshake or terminates an unresponsive child after the grace period.
+
 ### Review checkpoint
 
 Review lifecycle failures, stale diagnostics, multiple open tabs, Unicode positions, and project configuration—not only the happy-path underline.
@@ -467,6 +501,7 @@ src/
   render.rs      Render ordering and solid-rectangle pipeline
   editor.rs      Text buffer, editing operations, hit testing, and gutter text
   input.rs       Keyboard and mouse events translated into editor intentions
+  lsp.rs         Pyright process, JSON-RPC transport, synchronization, and diagnostics
   cursor.rs      Blink timing and cursor visibility
   theme.rs       Fonts, sizes, spacing, and colors
 shaders/

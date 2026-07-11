@@ -19,10 +19,13 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Click to place the cursor; click and drag to select text.
 - Type or press Backspace to replace or delete a selection.
 - Python `.py` and `.pyi` files receive incremental syntax highlighting; other files remain plain text.
+- Python diagnostics are supplied by `pyright-langserver` when that executable is available on `PATH`.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
 
 ## Run
+
+Install Pyright and ensure `pyright-langserver` is on `PATH` to enable diagnostics. The editor still runs normally without it.
 
 ```bash
 cargo run
@@ -34,7 +37,7 @@ Debug builds print the selected GPU adapter and first presented frame to the ter
 
 The editor supports multiple open documents with one active tab. It does not yet provide:
 
-- Language-server diagnostics or other language tooling
+- Completion, hover, or go-to-definition language tooling
 - IME pre-edit text or candidate-window positioning
 - Split panes, visible scrollbars, or settings
 

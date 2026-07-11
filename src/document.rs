@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use glyphon::Action;
 
 use crate::clipboard::ClipboardProvider;
-use crate::editor::{EditorChange, EditorState};
+use crate::editor::{DiagnosticSpan, EditorChange, EditorState};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
+use crate::lsp::{DiagnosticUpdate, LspDocument, Position};
 use crate::syntax::SyntaxState;
 
 const UNTITLED_NAME: &str = "Untitled";
@@ -245,6 +246,7 @@ impl Document {
         let Some(change) = self.editor.apply_input_with_change(input) else {
             return false;
         };
+        self.editor.clear_diagnostics();
         self.syntax.edit(&change, false);
         self.syntax.reparse();
         self.editor.apply_highlights(self.syntax.spans());
@@ -257,6 +259,7 @@ impl Document {
         let Some(change) = self.editor.apply_input_with_change(input) else {
             return false;
         };
+        self.editor.clear_diagnostics();
         self.syntax.edit(&change, false);
         self.syntax.reparse();
         self.editor.apply_highlights(self.syntax.spans());
@@ -286,10 +289,14 @@ impl Document {
     }
 
     fn apply_history_command(&mut self, command: HistoryCommand) -> bool {
-        match command {
+        let changed = match command {
             HistoryCommand::Undo => self.history.undo(&mut self.editor, &mut self.syntax),
             HistoryCommand::Redo => self.history.redo(&mut self.editor, &mut self.syntax),
+        };
+        if changed {
+            self.editor.clear_diagnostics();
         }
+        changed
     }
 
     fn is_reusable_scratch(&self) -> bool {
@@ -476,6 +483,50 @@ impl Documents {
         self.refresh_tab_labels();
     }
 
+    pub fn lsp_documents(&self) -> Vec<LspDocument> {
+        self.items
+            .iter()
+            .filter_map(|document| {
+                let path = document.path.as_ref()?;
+                is_python_path(path).then(|| LspDocument {
+                    path: path.clone(),
+                    text: document.editor.text(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn apply_diagnostics(&mut self, update: &DiagnosticUpdate) -> bool {
+        let Some(document) = self
+            .items
+            .iter_mut()
+            .find(|document| document.path.as_ref() == Some(&update.path))
+        else {
+            return false;
+        };
+        let text = document.editor.text();
+        let spans = update
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let start = utf16_position_to_byte(&text, diagnostic.range.start);
+                let end = utf16_position_to_byte(&text, diagnostic.range.end).max(start);
+                DiagnosticSpan {
+                    range: start..end,
+                    severity: diagnostic.severity,
+                }
+            })
+            .collect::<Vec<_>>();
+        document.editor.set_diagnostics(&spans);
+        true
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        for document in &mut self.items {
+            document.editor.clear_diagnostics();
+        }
+    }
+
     fn refresh_tab_labels(&mut self) {
         self.tab_labels.clear();
         for (index, document) in self.items.iter().enumerate() {
@@ -491,6 +542,52 @@ impl Documents {
             .editor
             .set_tab_labels(&self.tab_labels);
     }
+}
+
+fn is_python_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "py" | "pyi"))
+}
+
+fn utf16_position_to_byte(text: &str, position: Position) -> usize {
+    let bytes = text.as_bytes();
+    let mut line = 0;
+    let mut line_start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ending_length = match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if line == position.line {
+            return line_start + utf16_column_to_byte(&text[line_start..index], position.character);
+        }
+        line += 1;
+        index += ending_length;
+        line_start = index;
+    }
+    if line == position.line {
+        line_start + utf16_column_to_byte(&text[line_start..], position.character)
+    } else {
+        text.len()
+    }
+}
+
+fn utf16_column_to_byte(line: &str, column: usize) -> usize {
+    let mut utf16 = 0;
+    for (byte, character) in line.char_indices() {
+        let next = utf16 + character.len_utf16();
+        if column < next {
+            return byte;
+        }
+        utf16 = next;
+    }
+    line.len()
 }
 
 fn canonical_identity(path: &Path) -> PathBuf {
@@ -511,9 +608,74 @@ mod tests {
     use glyphon::Action;
     use glyphon::cosmic_text::Motion;
 
-    use super::Documents;
+    use super::{Documents, utf16_position_to_byte};
     use crate::clipboard::ClipboardProvider;
     use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
+    use crate::lsp::Position;
+
+    #[test]
+    fn lsp_utf16_positions_map_to_utf8_byte_offsets() {
+        let text = "a🦀b\r\nsecond";
+
+        assert_eq!(
+            utf16_position_to_byte(
+                text,
+                Position {
+                    line: 0,
+                    character: 1,
+                },
+            ),
+            1
+        );
+        assert_eq!(
+            utf16_position_to_byte(
+                text,
+                Position {
+                    line: 0,
+                    character: 3,
+                },
+            ),
+            5
+        );
+        assert_eq!(
+            utf16_position_to_byte(
+                text,
+                Position {
+                    line: 1,
+                    character: 3,
+                },
+            ),
+            11
+        );
+    }
+
+    #[test]
+    fn lsp_positions_inside_a_surrogate_pair_clamp_to_the_character_start() {
+        assert_eq!(
+            utf16_position_to_byte(
+                "🦀",
+                Position {
+                    line: 0,
+                    character: 1,
+                },
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn lsp_line_positions_handle_lone_carriage_returns() {
+        assert_eq!(
+            utf16_position_to_byte(
+                "first\rsecond",
+                Position {
+                    line: 1,
+                    character: 2,
+                },
+            ),
+            8
+        );
+    }
 
     #[derive(Default)]
     struct MemoryClipboard {

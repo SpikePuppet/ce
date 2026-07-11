@@ -15,6 +15,7 @@ use winit::window::Window;
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
+use crate::lsp::{DiagnosticUpdate, LspDocument};
 use crate::render::Renderer;
 use crate::theme;
 
@@ -239,6 +240,18 @@ impl GpuState {
 
     pub fn save_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
         self.renderer.save_document(path)
+    }
+
+    pub fn lsp_documents(&self) -> Vec<LspDocument> {
+        self.renderer.lsp_documents()
+    }
+
+    pub fn apply_diagnostics(&mut self, update: &DiagnosticUpdate) -> bool {
+        self.renderer.apply_diagnostics(update)
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        self.renderer.clear_diagnostics();
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
