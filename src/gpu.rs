@@ -299,6 +299,15 @@ impl GpuState {
         self.renderer.overlay_contains_position(position)
     }
 
+    pub fn update_diagnostic_hover(&mut self, position: [f32; 2]) -> bool {
+        self.renderer.update_diagnostic_hover(position)
+    }
+
+    pub fn update_tab_path_hover(&mut self, position: [f32; 2]) -> bool {
+        let logical_width = self.surface_config.width as f32 / self.window.scale_factor() as f32;
+        self.renderer.update_tab_path_hover(position, logical_width)
+    }
+
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.renderer.set_cursor_visible(visible);
     }

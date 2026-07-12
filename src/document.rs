@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use glyphon::Action;
@@ -12,9 +13,18 @@ use crate::editor::{DiagnosticSpan, EditorChange, EditorState};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
 use crate::syntax::SyntaxState;
+use crate::theme;
 
-const UNTITLED_NAME: &str = "Untitled";
 const EDIT_GROUP_TIMEOUT: Duration = Duration::from_millis(750);
+static SCRATCH_NAME_SEQUENCE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
+const SCRATCH_COLORS: &[&str] = &[
+    "Amber", "Azure", "Coral", "Crimson", "Indigo", "Jade", "Lilac", "Mint", "Peach", "Teal",
+    "Violet",
+];
+const SCRATCH_ANIMALS: &[&str] = &[
+    "Badger", "Capybara", "Falcon", "Fox", "Gecko", "Koala", "Otter", "Panda", "Quokka", "Raven",
+    "Tiger",
+];
 
 #[derive(Debug)]
 pub enum DocumentError {
@@ -63,6 +73,7 @@ pub struct Document {
     editor: EditorState,
     syntax: SyntaxState,
     path: Option<PathBuf>,
+    scratch_name: String,
     history: History,
 }
 
@@ -190,6 +201,7 @@ impl Document {
             editor: EditorState::new(),
             syntax: SyntaxState::Plain,
             path: None,
+            scratch_name: random_scratch_name(),
             history: History::default(),
         }
     }
@@ -212,6 +224,7 @@ impl Document {
             editor,
             syntax,
             path: Some(canonical_path),
+            scratch_name: String::new(),
             history: History::default(),
         })
     }
@@ -224,7 +237,7 @@ impl Document {
                 .as_deref()
                 .and_then(Path::file_name)
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| UNTITLED_NAME.to_owned()),
+                .unwrap_or_else(|| self.scratch_name.clone()),
             dirty: self.history.is_dirty(),
         }
     }
@@ -514,6 +527,7 @@ impl Documents {
                 DiagnosticSpan {
                     range: start..end,
                     severity: diagnostic.severity,
+                    message: diagnostic.message.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -611,6 +625,35 @@ impl Documents {
             .overlay_contains_position(position)
     }
 
+    pub fn update_diagnostic_hover(&mut self, position: [f32; 2]) -> bool {
+        self.items[self.active]
+            .editor
+            .update_diagnostic_hover(position)
+    }
+
+    pub fn update_tab_path_hover(&mut self, position: [f32; 2], viewport_width: f32) -> bool {
+        let tab_count = self.items.len();
+        let hovered =
+            tab_index_at_position(position, viewport_width, tab_count).and_then(|index| {
+                self.items[index]
+                    .path
+                    .as_ref()
+                    .map(|path| (index, path.clone()))
+            });
+        let editor = &mut self.items[self.active].editor;
+        match hovered {
+            Some((index, path)) => editor.show_tab_path(
+                index,
+                [
+                    index as f32 * tab_width(viewport_width, tab_count),
+                    theme::TAB_BAR_HEIGHT,
+                ],
+                &path.to_string_lossy(),
+            ),
+            None => editor.dismiss_tab_path(),
+        }
+    }
+
     fn refresh_tab_labels(&mut self) {
         self.tab_labels.clear();
         for (index, document) in self.items.iter().enumerate() {
@@ -626,6 +669,44 @@ impl Documents {
             .editor
             .set_tab_labels(&self.tab_labels);
     }
+}
+
+fn tab_width(viewport_width: f32, tab_count: usize) -> f32 {
+    if tab_count == 0 {
+        0.0
+    } else {
+        (viewport_width / tab_count as f32).min(theme::MAXIMUM_TAB_WIDTH)
+    }
+}
+
+fn tab_index_at_position(
+    position: [f32; 2],
+    viewport_width: f32,
+    tab_count: usize,
+) -> Option<usize> {
+    if position[0] < 0.0
+        || position[1] < 0.0
+        || position[1] >= theme::TAB_BAR_HEIGHT
+        || tab_count == 0
+    {
+        return None;
+    }
+    let index = (position[0] / tab_width(viewport_width, tab_count)).floor() as usize;
+    (index < tab_count).then_some(index)
+}
+
+fn random_scratch_name() -> String {
+    let value = SCRATCH_NAME_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |mut value| {
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            Some(value)
+        })
+        .unwrap_or_else(|value| value);
+    let color = SCRATCH_COLORS[value as usize % SCRATCH_COLORS.len()];
+    let animal = SCRATCH_ANIMALS[(value.rotate_left(29) as usize) % SCRATCH_ANIMALS.len()];
+    format!("{color} {animal}")
 }
 
 fn is_python_path(path: &Path) -> bool {
@@ -735,7 +816,7 @@ mod tests {
     use glyphon::Action;
     use glyphon::cosmic_text::Motion;
 
-    use super::{Documents, utf16_position_to_byte};
+    use super::{Documents, SCRATCH_ANIMALS, SCRATCH_COLORS, utf16_position_to_byte};
     use crate::clipboard::ClipboardProvider;
     use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
     use crate::lsp::{CompletionItem, Position, Range};
@@ -867,10 +948,15 @@ mod tests {
     }
 
     #[test]
-    fn scratch_document_has_a_stable_untitled_identity() {
+    fn scratch_document_has_a_stable_color_animal_identity() {
         let documents = Documents::new();
 
-        assert_eq!(documents.active_info().display_name, "Untitled");
+        let name = documents.active_info().display_name;
+        let mut parts = name.split_whitespace();
+        assert!(SCRATCH_COLORS.contains(&parts.next().unwrap()));
+        assert!(SCRATCH_ANIMALS.contains(&parts.next().unwrap()));
+        assert_eq!(parts.next(), None);
+        assert_eq!(documents.active_info().display_name, name);
         assert_eq!(documents.active_info().path, None);
         assert!(!documents.active_info().dirty);
     }
@@ -1136,7 +1222,8 @@ mod tests {
         );
         documents.close_active();
         assert_eq!(documents.len(), 1);
-        assert_eq!(documents.active_info().display_name, "Untitled");
+        let name = documents.active_info().display_name;
+        assert_eq!(name.split_whitespace().count(), 2);
         assert_eq!(active_text(&documents), "");
         assert!(!documents.active_info().dirty);
 

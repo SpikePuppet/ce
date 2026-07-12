@@ -437,6 +437,24 @@ impl Application {
         self.refresh_completion_overlay();
     }
 
+    fn update_pointer_hover(&mut self, position: [f32; 2]) {
+        if self.completion.is_some() {
+            self.update_completion_hover(position);
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            let tab_changed = gpu.update_tab_path_hover(position);
+            let diagnostic_changed = if position[1] >= theme::TAB_BAR_HEIGHT {
+                gpu.update_diagnostic_hover(position)
+            } else {
+                false
+            };
+            if tab_changed || diagnostic_changed {
+                gpu.window().request_redraw();
+            }
+        }
+    }
+
     fn apply_scroll_input(&mut self, input: EditorInput) {
         let EditorInput::Scroll([horizontal, vertical]) = input else {
             return;
@@ -576,14 +594,14 @@ impl Application {
             Some(path) => path,
             None => {
                 let suggested_name = if info.path.is_some() {
-                    info.display_name.as_str()
+                    info.display_name.clone()
                 } else {
-                    "Untitled.py"
+                    format!("{}.py", info.display_name)
                 };
                 let mut dialog = FileDialog::new()
                     .set_parent(gpu.window())
                     .set_title("Save File")
-                    .set_file_name(suggested_name);
+                    .set_file_name(&suggested_name);
                 if let Some(parent) = info.path.as_deref().and_then(std::path::Path::parent) {
                     dialog = dialog.set_directory(parent);
                 }
@@ -785,10 +803,13 @@ impl ApplicationHandler<LspEvent> for Application {
                 if let Some(input) = self.input.handle_cursor_moved(position, scale_factor) {
                     self.apply_input(input);
                 } else if let Some(position) = self.input.pointer_position() {
-                    self.update_completion_hover(position);
+                    self.update_pointer_hover(position);
                 }
             }
-            WindowEvent::CursorLeft { .. } => self.input.reset_pointer(),
+            WindowEvent::CursorLeft { .. } => {
+                self.update_pointer_hover([-1.0, -1.0]);
+                self.input.reset_pointer();
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(input) = self.input.handle_mouse_input(state, button) {
                     self.apply_input(input);

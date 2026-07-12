@@ -33,6 +33,7 @@ pub struct CursorRectangle {
 pub struct DiagnosticSpan {
     pub range: std::ops::Range<usize>,
     pub severity: DiagnosticSeverity,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +41,7 @@ pub struct DiagnosticRectangle {
     pub origin: [f32; 2],
     pub size: [f32; 2],
     pub color: [f32; 4],
+    diagnostic_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +52,7 @@ pub struct OverlayGeometry {
     pub selection_width: f32,
     pub has_documentation_pane: bool,
     pub completion_scroll: Option<CompletionScroll>,
+    pub window_coordinates: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,13 +82,22 @@ enum OverlayKind {
         item_count: usize,
     },
     Hover,
+    Diagnostic {
+        diagnostic_index: usize,
+        anchor: CursorRectangle,
+    },
+    TabPath {
+        tab_index: usize,
+        anchor: [f32; 2],
+    },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PositionedDiagnostic {
     start: Cursor,
     end: Cursor,
     severity: DiagnosticSeverity,
+    message: String,
 }
 
 #[derive(Clone, Copy)]
@@ -120,9 +132,11 @@ pub struct EditorState {
     overlay_text: String,
     overlay_documentation_text: String,
     overlay_kind: Option<OverlayKind>,
+    overlay_width: f32,
     overlay_rows: usize,
     overlay_menu_rows: usize,
     tab_label_text: String,
+    line_number_text: String,
     line_numbers: Buffer,
     editor: Editor<'static>,
     line_count: usize,
@@ -142,7 +156,7 @@ impl EditorState {
         let attrs = text_attributes();
 
         let mut code = Buffer::new(&mut font_system, metrics);
-        code.set_wrap(Wrap::None);
+        code.set_wrap(Wrap::WordOrGlyph);
         code.set_text("", &attrs, Shaping::Advanced, None);
 
         let mut editor = Editor::new(code);
@@ -173,9 +187,11 @@ impl EditorState {
             overlay_text: String::new(),
             overlay_documentation_text: String::new(),
             overlay_kind: None,
+            overlay_width: theme::HOVER_MINIMUM_WIDTH,
             overlay_rows: 0,
             overlay_menu_rows: 0,
             tab_label_text: "Untitled".to_owned(),
+            line_number_text: "1".to_owned(),
             line_numbers,
             editor,
             line_count: 1,
@@ -223,8 +239,9 @@ impl EditorState {
             }
             EditorInput::Scroll([horizontal, vertical]) => {
                 self.editor.with_buffer_mut(|buffer| {
-                    let (viewport, content) = editor_extents(buffer, self.line_count);
+                    let (viewport, content) = editor_extents(buffer);
                     buffer.set_scroll(clamped_scroll(
+                        buffer,
                         buffer.scroll(),
                         [horizontal, vertical],
                         viewport,
@@ -308,6 +325,7 @@ impl EditorState {
         documentation: Option<&str>,
     ) {
         const MAX_ROWS: usize = 8;
+        self.overlay_buffer.set_wrap(Wrap::None);
         let start = selected.saturating_sub(MAX_ROWS - 1);
         let visible = rows.iter().skip(start).take(MAX_ROWS).collect::<Vec<_>>();
         let lines = visible
@@ -337,15 +355,67 @@ impl EditorState {
     }
 
     pub fn show_hover(&mut self, contents: &str) {
-        let text = normalized_overlay_lines(contents, 10, 80).join("\n");
-        self.overlay_rows = text.lines().count().max(1);
+        self.show_hover_kind(contents, OverlayKind::Hover);
+    }
+
+    pub fn show_tab_path(&mut self, tab_index: usize, anchor: [f32; 2], path: &str) -> bool {
+        if matches!(self.overlay_kind, Some(OverlayKind::TabPath { tab_index: current, .. }) if current == tab_index)
+            && self.overlay_text == path
+        {
+            return false;
+        }
+        self.show_hover_kind(path, OverlayKind::TabPath { tab_index, anchor });
+        true
+    }
+
+    pub fn dismiss_tab_path(&mut self) -> bool {
+        if matches!(self.overlay_kind, Some(OverlayKind::TabPath { .. })) {
+            self.dismiss_overlay()
+        } else {
+            false
+        }
+    }
+
+    fn show_hover_kind(&mut self, contents: &str, kind: OverlayKind) {
+        let text = normalized_hover_text(contents);
+        let longest_line = text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        let available_width = self
+            .logical_size
+            .map_or(theme::HOVER_MAXIMUM_WIDTH, |(width, _)| {
+                (width - self.layout().code_left - theme::CONTENT_RIGHT_PADDING).max(1.0)
+            });
+        let maximum_width = theme::HOVER_MAXIMUM_WIDTH
+            .min(available_width)
+            .max(2.0 * theme::OVERLAY_PADDING + 1.0);
+        let minimum_width = theme::HOVER_MINIMUM_WIDTH.min(maximum_width);
+        self.overlay_width = (longest_line as f32 * theme::APPROXIMATE_CELL_WIDTH
+            + 2.0 * theme::OVERLAY_PADDING)
+            .clamp(minimum_width, maximum_width);
         self.overlay_menu_rows = 0;
-        self.overlay_kind = Some(OverlayKind::Hover);
+        self.overlay_kind = Some(kind);
+        self.overlay_buffer.set_wrap(Wrap::WordOrGlyph);
         self.overlay_buffer.set_size(
-            Some(theme::HOVER_WIDTH - 2.0 * theme::OVERLAY_PADDING),
-            Some(self.overlay_rows as f32 * theme::LINE_HEIGHT),
+            Some(self.overlay_width - 2.0 * theme::OVERLAY_PADDING),
+            None,
         );
         self.update_overlay_text(text, String::new());
+        self.overlay_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.overlay_rows = self
+            .overlay_buffer
+            .lines
+            .iter()
+            .map(|line| line.layout_opt().map_or(1, Vec::len))
+            .sum::<usize>()
+            .max(1);
+        self.overlay_buffer.set_size(
+            Some(self.overlay_width - 2.0 * theme::OVERLAY_PADDING),
+            Some(self.overlay_rows as f32 * theme::LINE_HEIGHT),
+        );
     }
 
     pub fn dismiss_overlay(&mut self) -> bool {
@@ -358,20 +428,41 @@ impl EditorState {
 
     pub fn overlay_geometry(&self) -> Option<OverlayGeometry> {
         let kind = self.overlay_kind?;
-        let cursor = self.cursor_rectangle?;
+        let cursor = match kind {
+            OverlayKind::Diagnostic { anchor, .. } => anchor,
+            OverlayKind::Completion { .. } | OverlayKind::Hover => self.cursor_rectangle?,
+            OverlayKind::TabPath { anchor, .. } => CursorRectangle {
+                origin: anchor,
+                size: [0.0, 0.0],
+            },
+        };
         let (window_width, window_height) = self.logical_size?;
         let layout = self.layout();
         let width = match kind {
             OverlayKind::Completion { .. } => {
                 theme::COMPLETION_WIDTH + theme::COMPLETION_DOCUMENTATION_WIDTH
             }
-            OverlayKind::Hover => theme::HOVER_WIDTH,
+            OverlayKind::Hover | OverlayKind::Diagnostic { .. } | OverlayKind::TabPath { .. } => {
+                self.overlay_width
+            }
         };
         let height = self.overlay_rows as f32 * theme::LINE_HEIGHT + 2.0 * theme::OVERLAY_PADDING;
         let editor_width =
             (window_width - layout.code_left - theme::CONTENT_RIGHT_PADDING).max(1.0);
         let editor_height =
             (window_height - theme::CONTENT_TOP - theme::CONTENT_BOTTOM_PADDING).max(1.0);
+        if matches!(kind, OverlayKind::TabPath { .. }) {
+            let x = cursor.origin[0].min((window_width - width).max(0.0));
+            return Some(OverlayGeometry {
+                origin: [x, cursor.origin[1] + 4.0],
+                size: [width.min(window_width), height.min(window_height)],
+                selected_row: None,
+                selection_width: width,
+                has_documentation_pane: false,
+                completion_scroll: None,
+                window_coordinates: true,
+            });
+        }
         let x = cursor.origin[0].min((editor_width - width).max(0.0));
         let below = cursor.origin[1] + cursor.size[1] + 4.0;
         let y = if below + height <= editor_height {
@@ -384,11 +475,15 @@ impl EditorState {
             size: [width.min(editor_width), height.min(editor_height)],
             selected_row: match kind {
                 OverlayKind::Completion { selected_row, .. } => Some(selected_row),
-                OverlayKind::Hover => None,
+                OverlayKind::Hover
+                | OverlayKind::Diagnostic { .. }
+                | OverlayKind::TabPath { .. } => None,
             },
             selection_width: match kind {
                 OverlayKind::Completion { .. } => theme::COMPLETION_WIDTH,
-                OverlayKind::Hover => width,
+                OverlayKind::Hover
+                | OverlayKind::Diagnostic { .. }
+                | OverlayKind::TabPath { .. } => width,
             },
             has_documentation_pane: matches!(kind, OverlayKind::Completion { .. }),
             completion_scroll: match kind {
@@ -401,9 +496,65 @@ impl EditorState {
                     visible_items: self.overlay_menu_rows,
                     item_count,
                 }),
-                OverlayKind::Hover => None,
+                OverlayKind::Hover
+                | OverlayKind::Diagnostic { .. }
+                | OverlayKind::TabPath { .. } => None,
             },
+            window_coordinates: false,
         })
+    }
+
+    pub fn update_diagnostic_hover(&mut self, position: [f32; 2]) -> bool {
+        let hovered = self.diagnostic_at_position(position);
+        match hovered {
+            Some((diagnostic_index, anchor)) => {
+                if matches!(
+                    self.overlay_kind,
+                    Some(OverlayKind::Diagnostic {
+                        diagnostic_index: current,
+                        anchor: current_anchor,
+                    }) if current == diagnostic_index && current_anchor == anchor
+                ) {
+                    return false;
+                }
+                let message = self.diagnostics[diagnostic_index].message.clone();
+                self.show_hover_kind(
+                    &message,
+                    OverlayKind::Diagnostic {
+                        diagnostic_index,
+                        anchor,
+                    },
+                );
+                true
+            }
+            None if matches!(self.overlay_kind, Some(OverlayKind::Diagnostic { .. })) => {
+                self.dismiss_overlay()
+            }
+            None => false,
+        }
+    }
+
+    fn diagnostic_at_position(&self, position: [f32; 2]) -> Option<(usize, CursorRectangle)> {
+        let layout = self.layout();
+        let x = position[0] - layout.code_left;
+        let y = position[1] - theme::CONTENT_TOP;
+        self.diagnostic_rectangles
+            .iter()
+            .rev()
+            .find_map(|rectangle| {
+                let top = rectangle.origin[1] + rectangle.size[1] - theme::LINE_HEIGHT;
+                (x >= rectangle.origin[0]
+                    && x < rectangle.origin[0] + rectangle.size[0]
+                    && y >= top
+                    && y < top + theme::LINE_HEIGHT)
+                    .then_some((
+                        rectangle.diagnostic_index,
+                        CursorRectangle {
+                            origin: [rectangle.origin[0], top],
+                            size: [rectangle.size[0], theme::LINE_HEIGHT],
+                        },
+                    ))
+            })
     }
 
     pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
@@ -429,8 +580,16 @@ impl EditorState {
             return false;
         };
         let layout = self.layout();
-        let left = layout.code_left + geometry.origin[0];
-        let top = theme::CONTENT_TOP + geometry.origin[1];
+        let left = if geometry.window_coordinates {
+            geometry.origin[0]
+        } else {
+            layout.code_left + geometry.origin[0]
+        };
+        let top = if geometry.window_coordinates {
+            geometry.origin[1]
+        } else {
+            theme::CONTENT_TOP + geometry.origin[1]
+        };
         position[0] >= left
             && position[0] < left + geometry.size[0]
             && position[1] >= top
@@ -535,10 +694,12 @@ impl EditorState {
 
     pub fn scroll_by(&mut self, [horizontal, vertical]: [f32; 2]) -> bool {
         let (before, viewport, content) = self.editor.with_buffer(|buffer| {
-            let (viewport, content) = editor_extents(buffer, self.line_count);
+            let (viewport, content) = editor_extents(buffer);
             (buffer.scroll(), viewport, content)
         });
-        let next = clamped_scroll(before, [horizontal, vertical], viewport, content);
+        let next = self.editor.with_buffer(|buffer| {
+            clamped_scroll(buffer, before, [horizontal, vertical], viewport, content)
+        });
         if next == before {
             return false;
         }
@@ -559,12 +720,11 @@ impl EditorState {
 
     pub fn scrollbars(&self) -> EditorScrollbars {
         self.editor.with_buffer(|buffer| {
-            let (viewport, content) = editor_extents(buffer, self.line_count);
+            let (viewport, content) = editor_extents(buffer);
             let [viewport_width, viewport_height] = viewport;
             let [content_width, content_height] = content;
             let scroll = buffer.scroll();
-            let vertical_offset =
-                scroll.line as f32 * theme::LINE_HEIGHT + scroll.vertical.max(0.0);
+            let vertical_offset = scroll_offset(buffer, scroll);
 
             EditorScrollbars {
                 vertical: scrollbar_thumb(
@@ -608,6 +768,9 @@ impl EditorState {
     }
 
     pub fn set_diagnostics(&mut self, spans: &[DiagnosticSpan]) {
+        if matches!(self.overlay_kind, Some(OverlayKind::Diagnostic { .. })) {
+            self.dismiss_overlay();
+        }
         self.diagnostics = self.editor.with_buffer(|buffer| {
             spans
                 .iter()
@@ -615,6 +778,7 @@ impl EditorState {
                     start: cursor_for_byte_offset(buffer, span.range.start),
                     end: cursor_for_byte_offset(buffer, span.range.end),
                     severity: span.severity,
+                    message: span.message.clone(),
                 })
                 .collect()
         });
@@ -622,6 +786,9 @@ impl EditorState {
     }
 
     pub fn clear_diagnostics(&mut self) {
+        if matches!(self.overlay_kind, Some(OverlayKind::Diagnostic { .. })) {
+            self.dismiss_overlay();
+        }
         self.diagnostics.clear();
         self.diagnostic_rectangles.clear();
     }
@@ -749,17 +916,6 @@ impl EditorState {
         }
 
         self.line_count = line_count;
-        let numbers = (1..=line_count)
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.line_numbers.set_text(
-            &numbers,
-            &text_attributes(),
-            Shaping::Advanced,
-            Some(Align::Right),
-        );
-
         let new_gutter_width = gutter_width_for_line_count(line_count);
         let geometry_changed = new_gutter_width != self.gutter_width;
         self.gutter_width = new_gutter_width;
@@ -768,16 +924,50 @@ impl EditorState {
 
     fn shape_and_sync_scroll(&mut self) {
         self.editor.shape_as_needed(&mut self.font_system, false);
-        let code_scroll = self.editor.with_buffer(Buffer::scroll);
-        self.line_numbers.set_scroll(Scroll {
-            horizontal: 0.0,
-            ..code_scroll
+        self.editor.with_buffer_mut(|buffer| {
+            for line_index in 0..buffer.lines.len() {
+                buffer.line_layout(&mut self.font_system, line_index);
+            }
         });
+        self.sync_visual_line_numbers();
+        let code_scroll = self.editor.with_buffer(Buffer::scroll);
+        let visual_scroll = self
+            .editor
+            .with_buffer(|buffer| scroll_offset(buffer, code_scroll));
+        self.line_numbers.set_scroll(Scroll::new(
+            (visual_scroll / theme::LINE_HEIGHT).floor() as usize,
+            visual_scroll % theme::LINE_HEIGHT,
+            0.0,
+        ));
         self.line_numbers
             .shape_until_scroll(&mut self.font_system, false);
         self.rebuild_selection_rectangles();
         self.rebuild_diagnostic_rectangles();
         self.rebuild_cursor_rectangle();
+    }
+
+    fn sync_visual_line_numbers(&mut self) {
+        let numbers = self.editor.with_buffer(|buffer| {
+            let mut rows = Vec::new();
+            for (line_index, line) in buffer.lines.iter().enumerate() {
+                rows.push((line_index + 1).to_string());
+                let continuation_rows = line
+                    .layout_opt()
+                    .map_or(0, |layout| layout.len().saturating_sub(1));
+                rows.extend(std::iter::repeat_n(String::new(), continuation_rows));
+            }
+            rows.join("\n")
+        });
+        if numbers == self.line_number_text {
+            return;
+        }
+        self.line_number_text = numbers;
+        self.line_numbers.set_text(
+            &self.line_number_text,
+            &text_attributes(),
+            Shaping::Advanced,
+            Some(Align::Right),
+        );
     }
 
     fn editor_coordinates(&self, window_position: [f32; 2]) -> (i32, i32) {
@@ -870,7 +1060,7 @@ impl EditorState {
             let fallback_width = buffer
                 .monospace_width()
                 .unwrap_or(theme::APPROXIMATE_CELL_WIDTH);
-            for diagnostic in diagnostics {
+            for (diagnostic_index, diagnostic) in diagnostics.iter().enumerate() {
                 for run in buffer.layout_runs() {
                     if run.line_i < diagnostic.start.line || run.line_i > diagnostic.end.line {
                         continue;
@@ -882,6 +1072,7 @@ impl EditorState {
                                 origin: [x, run.line_top + run.line_height - 2.0],
                                 size: [fallback_width, 2.0],
                                 color: diagnostic_color(diagnostic.severity),
+                                diagnostic_index,
                             });
                         }
                         continue;
@@ -892,6 +1083,7 @@ impl EditorState {
                                 origin: [x, run.line_top + run.line_height - 2.0],
                                 size: [width, 2.0],
                                 color: diagnostic_color(diagnostic.severity),
+                                diagnostic_index,
                             });
                         }
                     }
@@ -930,31 +1122,20 @@ fn normalized_overlay_lines(
         .collect()
 }
 
-fn approximate_line_columns(text: &str) -> usize {
-    text.chars().fold(0, |column, character| {
-        if character == '\t' {
-            let tab = usize::from(theme::TAB_WIDTH);
-            (column / tab + 1) * tab
-        } else {
-            column + usize::from(!character.is_ascii()) + 1
-        }
-    })
+fn normalized_hover_text(contents: &str) -> String {
+    contents
+        .lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn editor_extents(buffer: &Buffer, line_count: usize) -> ([f32; 2], [f32; 2]) {
+fn editor_extents(buffer: &Buffer) -> ([f32; 2], [f32; 2]) {
     let (viewport_width, viewport_height) = buffer.size();
     let viewport = [
         viewport_width.unwrap_or(0.0),
         viewport_height.unwrap_or(0.0),
     ];
-    let cell_width = buffer
-        .monospace_width()
-        .unwrap_or(theme::APPROXIMATE_CELL_WIDTH);
-    let approximate_width = buffer
-        .lines
-        .iter()
-        .map(|line| approximate_line_columns(line.text()) as f32 * cell_width)
-        .fold(0.0, f32::max);
     let measured_width = buffer
         .lines
         .iter()
@@ -965,28 +1146,51 @@ fn editor_extents(buffer: &Buffer, line_count: usize) -> ([f32; 2], [f32; 2]) {
     (
         viewport,
         [
-            approximate_width.max(measured_width),
-            line_count as f32 * theme::LINE_HEIGHT,
+            measured_width,
+            buffer
+                .lines
+                .iter()
+                .map(|line| line.layout_opt().map_or(1, Vec::len) as f32 * theme::LINE_HEIGHT)
+                .sum(),
         ],
     )
 }
 
+fn scroll_offset(buffer: &Buffer, scroll: Scroll) -> f32 {
+    let preceding_height = buffer
+        .lines
+        .iter()
+        .take(scroll.line)
+        .map(|line| line.layout_opt().map_or(1, Vec::len) as f32 * theme::LINE_HEIGHT)
+        .sum::<f32>();
+    preceding_height + scroll.vertical.max(0.0)
+}
+
+fn scroll_for_offset(buffer: &Buffer, offset: f32, horizontal: f32) -> Scroll {
+    let mut remaining = offset.max(0.0);
+    for (line_index, line) in buffer.lines.iter().enumerate() {
+        let height = line.layout_opt().map_or(1, Vec::len) as f32 * theme::LINE_HEIGHT;
+        if remaining < height || line_index + 1 == buffer.lines.len() {
+            return Scroll::new(line_index, remaining.min(height), horizontal);
+        }
+        remaining -= height;
+    }
+    Scroll::default()
+}
+
 fn clamped_scroll(
+    buffer: &Buffer,
     current: Scroll,
     [horizontal, vertical]: [f32; 2],
     viewport: [f32; 2],
     content: [f32; 2],
 ) -> Scroll {
-    let vertical_offset = current.line as f32 * theme::LINE_HEIGHT + current.vertical.max(0.0);
+    let vertical_offset = scroll_offset(buffer, current);
     let next_horizontal =
         (current.horizontal + horizontal).clamp(0.0, (content[0] - viewport[0]).max(0.0));
     let next_vertical =
         (vertical_offset + vertical).clamp(0.0, (content[1] - viewport[1]).max(0.0));
-    Scroll::new(
-        (next_vertical / theme::LINE_HEIGHT).floor() as usize,
-        next_vertical % theme::LINE_HEIGHT,
-        next_horizontal,
-    )
+    scroll_for_offset(buffer, next_vertical, next_horizontal)
 }
 
 fn scrollbar_thumb(
@@ -1052,7 +1256,7 @@ mod tests {
     use glyphon::cosmic_text::{Cursor, Motion, Selection};
     use glyphon::{Action, Buffer, Edit};
 
-    use super::{DiagnosticSpan, EditorState, gutter_width_for_line_count};
+    use super::{DiagnosticSpan, EditorState, OverlayKind, gutter_width_for_line_count};
     use crate::input::{EditorCommand, EditorInput};
     use crate::lsp::DiagnosticSeverity;
     use crate::syntax::{HighlightKind, HighlightSpan};
@@ -1143,6 +1347,7 @@ mod tests {
         editor.set_diagnostics(&[DiagnosticSpan {
             range: 0..12,
             severity: DiagnosticSeverity::Error,
+            message: "Name is not defined".to_owned(),
         }]);
 
         assert!(!editor.diagnostic_rectangles().is_empty());
@@ -1152,6 +1357,20 @@ mod tests {
                 .iter()
                 .all(|rectangle| rectangle.color == crate::theme::DIAGNOSTIC_ERROR)
         );
+
+        let underline = editor.diagnostic_rectangles()[0];
+        let hover_position = [
+            editor.layout().code_left + underline.origin[0] + 1.0,
+            crate::theme::CONTENT_TOP + underline.origin[1] - crate::theme::LINE_HEIGHT / 2.0,
+        ];
+        assert!(editor.update_diagnostic_hover(hover_position));
+        assert_eq!(editor.overlay_text, "Name is not defined");
+        assert!(matches!(
+            editor.overlay_kind,
+            Some(OverlayKind::Diagnostic { .. })
+        ));
+        assert!(editor.update_diagnostic_hover([0.0, 0.0]));
+        assert!(editor.overlay_geometry().is_none());
 
         editor.clear_diagnostics();
         assert!(editor.diagnostic_rectangles().is_empty());
@@ -1209,7 +1428,29 @@ mod tests {
     }
 
     #[test]
-    fn scroll_input_moves_code_and_line_numbers_without_moving_the_cursor() {
+    fn hover_overlay_grows_horizontally_then_word_wraps_without_truncating() {
+        let mut editor = EditorState::with_text("value");
+        editor.resize(800.0, 600.0);
+
+        editor.show_hover("Short diagnostic");
+        let short = editor.overlay_geometry().expect("hover is visible");
+        assert_eq!(short.size[0], crate::theme::HOVER_MINIMUM_WIDTH);
+        assert_eq!(editor.overlay_rows, 1);
+
+        let long = format!(
+            "{} final-marker",
+            "a detailed diagnostic message ".repeat(30)
+        );
+        editor.show_hover(&long);
+        let wrapped = editor.overlay_geometry().expect("hover is visible");
+        assert_eq!(wrapped.size[0], crate::theme::HOVER_MAXIMUM_WIDTH);
+        assert!(editor.overlay_rows > 1);
+        assert!(editor.overlay_text.ends_with("final-marker"));
+        assert_eq!(editor.overlay_text, long);
+    }
+
+    #[test]
+    fn scroll_input_moves_wrapped_code_and_line_numbers_without_moving_the_cursor() {
         let text = (0..20)
             .map(|index| format!("{index}: {}", "x".repeat(80)))
             .collect::<Vec<_>>()
@@ -1221,10 +1462,15 @@ mod tests {
         editor.apply_input(EditorInput::Scroll([48.0, 96.0]));
 
         let scroll = editor.editor.with_buffer(Buffer::scroll);
-        assert!(scroll.horizontal > 0.0);
+        assert_eq!(scroll.horizontal, 0.0);
         assert!(scroll.line > 0 || scroll.vertical > 0.0);
-        assert_eq!(editor.line_numbers.scroll().line, scroll.line);
-        assert_eq!(editor.line_numbers.scroll().vertical, scroll.vertical);
+        let code_offset = editor
+            .editor
+            .with_buffer(|buffer| super::scroll_offset(buffer, scroll));
+        let gutter_scroll = editor.line_numbers.scroll();
+        let gutter_offset =
+            gutter_scroll.line as f32 * crate::theme::LINE_HEIGHT + gutter_scroll.vertical;
+        assert_eq!(gutter_offset, code_offset);
         assert_eq!(editor.cursor(), cursor);
     }
 
@@ -1259,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn scrollbars_appear_only_for_overflowing_dimensions() {
+    fn wrapped_content_only_creates_a_vertical_scrollbar() {
         let mut short = EditorState::with_text("small");
         short.resize(640.0, 400.0);
         assert_eq!(short.scrollbars(), super::EditorScrollbars::default());
@@ -1272,11 +1518,37 @@ mod tests {
         overflowing.resize(240.0, 120.0);
         let before = overflowing.scrollbars();
         assert!(before.vertical.is_some());
-        assert!(before.horizontal.is_some());
+        assert!(before.horizontal.is_none());
         overflowing.scroll_by([48.0, 96.0]);
         let after = overflowing.scrollbars();
         assert!(after.vertical.unwrap().origin[1] > before.vertical.unwrap().origin[1]);
-        assert!(after.horizontal.unwrap().origin[0] > before.horizontal.unwrap().origin[0]);
+        assert!(after.horizontal.is_none());
+    }
+
+    #[test]
+    fn word_wrapping_is_enabled_by_default_and_aligns_continuation_rows() {
+        let mut editor = EditorState::with_text(&format!("{}\nshort", "word ".repeat(30)));
+        editor.resize(240.0, 200.0);
+
+        assert_eq!(
+            editor.editor.with_buffer(Buffer::wrap),
+            glyphon::cosmic_text::Wrap::WordOrGlyph
+        );
+        let first_line_rows = editor.editor.with_buffer(|buffer| {
+            buffer.lines[0]
+                .layout_opt()
+                .expect("the document is shaped")
+                .len()
+        });
+        assert!(first_line_rows > 1);
+        let gutter_rows = buffer_text(&editor.line_numbers)
+            .split('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(gutter_rows[0], "1");
+        assert!(gutter_rows[1..first_line_rows].iter().all(String::is_empty));
+        assert_eq!(gutter_rows[first_line_rows], "2");
+        assert!(editor.scrollbars().horizontal.is_none());
     }
 
     #[test]

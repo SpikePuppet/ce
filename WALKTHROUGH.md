@@ -59,8 +59,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Text, Enter, four-space Tab, Backspace, and four arrow motions update the buffer through `cosmic-text` editing primitives.
 - Command- and Control-modified text is suppressed so unimplemented shortcuts cannot insert stray characters; Option-modified Unicode remains valid text.
 - Committed macOS IME text is accepted, while pre-edit UI remains a later hardening task.
-- Line-number text is regenerated only when the logical line count changes, and the gutter can grow at larger digit counts.
-- `cosmic-text` keeps the insertion point visible horizontally and vertically; the line-number buffer mirrors only its vertical scroll.
+- Line-number text adds blank continuation rows when wrapping changes, and the gutter can grow at larger logical line counts.
+- `cosmic-text` keeps the insertion point visible vertically as wrapped lines flow through the viewport; the line-number buffer mirrors that visual scroll.
 - Live resize now configures and presents a new frame inside the resize event instead of leaving AppKit to stretch the previous swapchain image while a redraw waits in the queue.
 - Formatting, compilation, Clippy with denied warnings, and sixteen editor/input/rendering tests pass.
 - Live typing, scrolling, line-number updates, resizing, and shutdown completed without Metal or text-engine errors.
@@ -73,7 +73,7 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - `cosmic-text` remains the source of truth for forward and backward selection ranges and selection replacement/deletion.
 - Plain Left and Right arrows clear an existing selection anchor and collapse to its start or end; other plain motions clear the anchor before moving, preventing a stale selection from reappearing.
 - Selection rectangles are derived from shaped layout runs, including disjoint spans for mixed-direction text and line-edge extension for multiline selections.
-- Derived rectangles are clipped to the editor viewport before entering the instanced GPU rectangle batch, so horizontal scrolling cannot paint over the gutter.
+- Derived rectangles are clipped to the editor viewport before entering the instanced GPU rectangle batch, so wrapped content cannot paint over the gutter.
 - Formatting, compilation, Clippy with denied warnings, and twenty-two editor/input/rendering tests pass.
 - Click placement, bidirectional drag selection, multiline selection, replacement, deletion, and shutdown completed without Metal or text-engine errors.
 - Dragging outside the visible viewport to auto-scroll is deferred as the first interaction follow-up after the MVP.
@@ -191,10 +191,10 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 
 - The completion surface uses a stable two-pane footprint: suggestions remain on the left and documentation updates independently on the right, so lazy documentation cannot resize or relocate the menu.
 - Suggestion and documentation buffers cache their last text; moving within the visible window normally updates only the selected GPU rectangle instead of resetting and reshaping every popup glyph.
-- Mouse-wheel line deltas and Retina-correct trackpad pixel deltas scroll the document vertically and horizontally while preserving its cursor and selection.
+- Mouse-wheel line deltas and Retina-correct trackpad pixel deltas scroll the wrapped document vertically while preserving its cursor and selection.
 - While completion is open, the same vertical deltas navigate its full item list; fractional trackpad movement accumulates until it crosses one row and selection remains clamped at both ends.
-- Line numbers mirror manual vertical scrolling, while horizontal movement remains isolated to code.
-- Scroll input is clamped independently against explicit horizontal and vertical content extents before state is mutated; repeated diagonal trackpad noise at the top, bottom, left, or right boundary becomes a true no-op instead of shifting an otherwise non-scrollable axis.
+- Line numbers mirror manual vertical scrolling across both logical and wrapped continuation rows.
+- Scroll input is clamped against the wrapped document's explicit vertical content extent before state is mutated; repeated trackpad noise at the top or bottom boundary becomes a true no-op.
 - Small proportional GPU scrollbar thumbs appear for each overflowing document axis and for completion lists longer than their eight-row viewport; non-overflowing content has no unnecessary bar.
 - Scrollbars render in the final overlay pass, staying visible above code while remaining beneath completion surfaces that cover them.
 - Formatting, compilation, Clippy with denied warnings, seventy-six tests, and the optimized release build pass.
@@ -336,7 +336,7 @@ Review transaction boundaries rather than only checking whether text eventually 
 - The first Open reuses an untouched scratch tab; the second creates another tab.
 - Reopening an existing path switches to it without losing unsaved edits.
 - Clicking labels and both keyboard shortcut families switch tabs.
-- Cursor, selection, horizontal/vertical scroll, and undo history survive switching.
+- Cursor, selection, vertical scroll, and undo history survive switching.
 - Dirty markers and the window title follow edits, saves, undo, redo, and switching.
 - Cmd+W supports Save, Don't Save, and Cancel for the active document.
 - Closing the last tab produces one clean Untitled tab.
@@ -466,7 +466,7 @@ It will support:
 - Backspace
 - Click-and-drag mouse selection
 - Automatic scrolling to keep the cursor visible
-- A dark theme, Menlo, four-space indentation, and no line wrapping
+- A dark theme, Menlo, four-space indentation, and word wrapping
 - Retina displays and window resizing
 
 It will not yet support:
@@ -496,7 +496,7 @@ Those are future increments, not hidden requirements for the first release.
 | Text | `glyphon` with its `cosmic-text` re-export | `cosmic-text` supplies shaping and editing primitives; `glyphon` caches and renders its glyphs through `wgpu`. |
 | Editor storage | `cosmic_text::Editor` for the MVP | It is sufficient for a scratch buffer and avoids introducing a second document model too early. |
 | Rendering cadence | On demand | We redraw for changes, resize, selection dragging, and cursor blink instead of running a permanent 60 FPS loop. |
-| Defaults | Dark, Menlo, four spaces, no wrap | Sensible code-editor defaults for the initial user. |
+| Defaults | Dark, Menlo, four spaces, word wrap | Sensible code-editor defaults for the initial user. |
 | Review style | Stop after every milestone | Each slice should be understandable and verified before the next abstraction arrives. |
 
 ## Dependency set
@@ -718,11 +718,11 @@ Review one captured frame and trace a glyph and a rectangle from application dat
 
 - Replace the sample with a real `cosmic_text::Editor`-backed scratch buffer.
 - Translate text input, Enter, Tab, Backspace, and four arrow keys into editing operations.
-- Disable line wrapping.
+- Enable word wrapping with character fallback for overlong tokens.
 - Delete the active selection before inserting new text or applying Backspace.
 - Generate right-aligned line numbers from the buffer's logical lines.
 - Recompute gutter width when the number of digits grows.
-- Keep the cursor position visible through minimal vertical and horizontal scrolling.
+- Keep the cursor position visible through minimal vertical scrolling.
 
 ### Rust concepts
 

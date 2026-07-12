@@ -23,7 +23,8 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Use Ctrl+Space for Python completion, Cmd+I for hover information, and F12 to go to a definition.
 - In completion menus, use Up/Down to navigate, Enter or Tab to accept, and Escape to dismiss.
 - Hovering a completion item with the mouse selects it and shows its documentation when available.
-- Scroll vertically or horizontally with a trackpad or mouse wheel; while completion is open, vertical scrolling navigates its suggestions.
+- Lines wrap at word boundaries by default, with character-level fallback for tokens wider than the editor.
+- Scroll vertically with a trackpad or mouse wheel; while completion is open, vertical scrolling navigates its suggestions.
 - Small proportional scrollbars appear automatically for overflowing files and completion lists.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.

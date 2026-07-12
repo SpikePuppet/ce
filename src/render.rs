@@ -385,6 +385,15 @@ impl Renderer {
         self.documents.overlay_contains_position(position)
     }
 
+    pub fn update_diagnostic_hover(&mut self, position: [f32; 2]) -> bool {
+        self.documents.update_diagnostic_hover(position)
+    }
+
+    pub fn update_tab_path_hover(&mut self, position: [f32; 2], viewport_width: f32) -> bool {
+        self.documents
+            .update_tab_path_hover(position, viewport_width)
+    }
+
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
     }
@@ -400,6 +409,9 @@ impl Renderer {
         let tab_count = self.documents.len();
         let active_tab = self.documents.active_index();
         let tab_width = tab_width(logical_width, tab_count);
+        let dirty_tabs = (0..tab_count)
+            .map(|index| self.documents.info_at(index).is_some_and(|info| info.dirty))
+            .collect::<Vec<_>>();
         let editor = self.documents.active_editor_mut();
         editor.resize(logical_width, logical_height);
         let layout = editor.layout();
@@ -429,6 +441,24 @@ impl Renderer {
             [logical_width, 1.0],
             theme::TAB_DIVIDER,
         ));
+        for (index, dirty) in dirty_tabs.into_iter().enumerate() {
+            if dirty {
+                push_tab_outline(
+                    &mut self.scene_rectangles,
+                    [index as f32 * tab_width, 0.0],
+                    [tab_width, theme::TAB_BAR_HEIGHT],
+                    1.0,
+                    theme::TAB_DIRTY_OUTLINE,
+                );
+            }
+            if index == active_tab {
+                self.scene_rectangles.push(Rectangle::new(
+                    [index as f32 * tab_width + 1.0, theme::TAB_BAR_HEIGHT - 3.0],
+                    [(tab_width - 2.0).max(0.0), 3.0],
+                    theme::TAB_ACTIVE_INDICATOR,
+                ));
+            }
+        }
         self.scene_rectangles.push(Rectangle::new(
             [0.0, theme::TAB_BAR_HEIGHT],
             [
@@ -568,9 +598,10 @@ impl Renderer {
         let overlay_area = overlay_buffer
             .zip(overlay_geometry)
             .and_then(|(buffer, geometry)| {
-                let rectangle = translate_editor_rectangle(
+                let rectangle = translate_overlay_rectangle(
                     geometry.origin,
                     geometry.size,
+                    geometry.window_coordinates,
                     layout,
                     logical_width,
                     logical_height,
@@ -589,9 +620,10 @@ impl Renderer {
         let overlay_documentation_area = overlay_documentation_buffer
             .zip(overlay_geometry)
             .and_then(|(buffer, geometry)| {
-                let rectangle = translate_editor_rectangle(
+                let rectangle = translate_overlay_rectangle(
                     geometry.origin,
                     geometry.size,
+                    geometry.window_coordinates,
                     layout,
                     logical_width,
                     logical_height,
@@ -694,6 +726,29 @@ fn tab_at_position(position: [f32; 2], viewport_width: f32, tab_count: usize) ->
     (index < tab_count).then_some(index)
 }
 
+fn push_tab_outline(
+    rectangles: &mut Vec<Rectangle>,
+    origin: [f32; 2],
+    size: [f32; 2],
+    thickness: f32,
+    color: [f32; 4],
+) {
+    rectangles.extend([
+        Rectangle::new(origin, [size[0], thickness], color),
+        Rectangle::new(
+            [origin[0], origin[1] + size[1] - thickness],
+            [size[0], thickness],
+            color,
+        ),
+        Rectangle::new(origin, [thickness, size[1]], color),
+        Rectangle::new(
+            [origin[0] + size[0] - thickness, origin[1]],
+            [thickness, size[1]],
+            color,
+        ),
+    ]);
+}
+
 fn logical_extent(physical_size: PhysicalSize<u32>, scale_factor: f32) -> (f32, f32) {
     (
         physical_size.width as f32 / scale_factor,
@@ -772,9 +827,10 @@ fn overlay_rectangles(
     viewport_height: f32,
 ) -> Vec<Rectangle> {
     let mut rectangles = Vec::with_capacity(5);
-    if let Some(border) = translate_editor_rectangle(
+    if let Some(border) = translate_overlay_rectangle(
         overlay.origin,
         overlay.size,
+        overlay.window_coordinates,
         layout,
         viewport_width,
         viewport_height,
@@ -787,9 +843,10 @@ fn overlay_rectangles(
         (overlay.size[0] - 2.0).max(0.0),
         (overlay.size[1] - 2.0).max(0.0),
     ];
-    if let Some(background) = translate_editor_rectangle(
+    if let Some(background) = translate_overlay_rectangle(
         inner_origin,
         inner_size,
+        overlay.window_coordinates,
         layout,
         viewport_width,
         viewport_height,
@@ -803,9 +860,10 @@ fn overlay_rectangles(
             overlay.origin[1] + theme::OVERLAY_PADDING + row as f32 * theme::LINE_HEIGHT,
         ];
         let size = [(overlay.selection_width - 2.0).max(0.0), theme::LINE_HEIGHT];
-        if let Some(selection) = translate_editor_rectangle(
+        if let Some(selection) = translate_overlay_rectangle(
             origin,
             size,
+            overlay.window_coordinates,
             layout,
             viewport_width,
             viewport_height,
@@ -819,9 +877,10 @@ fn overlay_rectangles(
             overlay.origin[0] + overlay.selection_width,
             overlay.origin[1] + 1.0,
         ];
-        if let Some(divider) = translate_editor_rectangle(
+        if let Some(divider) = translate_overlay_rectangle(
             divider_origin,
             [1.0, (overlay.size[1] - 2.0).max(0.0)],
+            overlay.window_coordinates,
             layout,
             viewport_width,
             viewport_height,
@@ -859,6 +918,36 @@ fn overlay_rectangles(
         }
     }
     rectangles
+}
+
+fn translate_overlay_rectangle(
+    origin: [f32; 2],
+    size: [f32; 2],
+    window_coordinates: bool,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+    color: [f32; 4],
+) -> Option<Rectangle> {
+    if !window_coordinates {
+        return translate_editor_rectangle(
+            origin,
+            size,
+            layout,
+            viewport_width,
+            viewport_height,
+            color,
+        );
+    }
+    let left = origin[0].max(0.0);
+    let top = origin[1].max(0.0);
+    let right = (origin[0] + size[0]).min(viewport_width);
+    let bottom = (origin[1] + size[1]).min(viewport_height);
+    (right > left && bottom > top).then_some(Rectangle::new(
+        [left, top],
+        [right - left, bottom - top],
+        color,
+    ))
 }
 
 fn translate_editor_rectangle(
