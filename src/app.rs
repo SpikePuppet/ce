@@ -7,8 +7,9 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
-use winit::event::{StartCause, WindowEvent};
+use winit::event::{ElementState, KeyEvent, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, NamedKey};
 use winit::platform::macos::WindowExtMacOS;
 use winit::window::{Window, WindowId};
 
@@ -17,9 +18,9 @@ use crate::cursor::CursorBlink;
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
 use crate::input::{
     ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand, InputState,
-    KeyInput,
+    KeyInput, LanguageCommand,
 };
-use crate::lsp::{LspEvent, LspManager};
+use crate::lsp::{CompletionItem, LspEvent, LspManager, LspOutcome};
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -89,6 +90,13 @@ struct Application {
     failure: Option<AppError>,
     lsp: LspManager,
     lsp_error_shown: bool,
+    completion: Option<CompletionSession>,
+}
+
+struct CompletionSession {
+    path: std::path::PathBuf,
+    items: Vec<CompletionItem>,
+    selected: usize,
 }
 
 impl Application {
@@ -101,6 +109,7 @@ impl Application {
             failure: None,
             lsp: LspManager::new(proxy),
             lsp_error_shown: false,
+            completion: None,
         }
     }
 
@@ -166,6 +175,7 @@ impl Application {
             return;
         }
 
+        self.dismiss_language_ui();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -175,6 +185,7 @@ impl Application {
     }
 
     fn apply_editor_command(&mut self, command: EditorCommand) {
+        self.dismiss_language_ui();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -183,6 +194,7 @@ impl Application {
     }
 
     fn apply_clipboard_command(&mut self, command: ClipboardCommand) {
+        self.dismiss_language_ui();
         let result = match self.gpu.as_mut() {
             Some(gpu) => gpu.apply_clipboard_command(command, &mut self.clipboard),
             None => return,
@@ -196,6 +208,7 @@ impl Application {
     }
 
     fn apply_history_command(&mut self, command: HistoryCommand) {
+        self.dismiss_language_ui();
         let changed = self
             .gpu
             .as_mut()
@@ -231,6 +244,7 @@ impl Application {
 
     fn set_cursor_focus(&mut self, focused: bool) {
         if !focused {
+            self.dismiss_language_ui();
             self.input.reset_pointer();
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.break_history_group();
@@ -265,6 +279,96 @@ impl Application {
             Command::Editor(command) => self.apply_editor_command(command),
             Command::Clipboard(command) => self.apply_clipboard_command(command),
             Command::History(command) => self.apply_history_command(command),
+            Command::Language(command) => self.handle_language_command(command),
+        }
+    }
+
+    fn handle_language_command(&mut self, command: LanguageCommand) {
+        self.dismiss_language_ui();
+        let Some((path, position)) = self.gpu.as_ref().and_then(GpuState::active_lsp_position)
+        else {
+            return;
+        };
+        match command {
+            LanguageCommand::Completion => self.lsp.request_completion(&path, position),
+            LanguageCommand::Hover => self.lsp.request_hover(&path, position),
+            LanguageCommand::GoToDefinition => self.lsp.request_definition(&path, position),
+        }
+    }
+
+    fn handle_completion_key(&mut self, event: &KeyEvent) -> bool {
+        if event.state != ElementState::Pressed || self.completion.is_none() {
+            return false;
+        }
+        match event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => {
+                let completion = self.completion.as_mut().expect("completion was checked");
+                completion.selected = (completion.selected + 1).min(completion.items.len() - 1);
+                self.refresh_completion_overlay();
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let completion = self.completion.as_mut().expect("completion was checked");
+                completion.selected = completion.selected.saturating_sub(1);
+                self.refresh_completion_overlay();
+                true
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Tab) => {
+                self.accept_completion();
+                true
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.dismiss_language_ui();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        if !self
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.active_path_is(&completion.path))
+        {
+            self.dismiss_language_ui();
+            return;
+        }
+        let item = completion.items[completion.selected].clone();
+        let changed = self.gpu.as_mut().is_some_and(|gpu| {
+            gpu.dismiss_overlay();
+            gpu.apply_completion(&item)
+        });
+        self.finish_editor_interaction(changed);
+    }
+
+    fn refresh_completion_overlay(&mut self) {
+        let Some(completion) = &self.completion else {
+            return;
+        };
+        let rows = completion
+            .items
+            .iter()
+            .map(|item| match &item.detail {
+                Some(detail) => format!("{}    {}", item.label, detail),
+                None => item.label.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.show_completion(&rows, completion.selected);
+            gpu.window().request_redraw();
+        }
+    }
+
+    fn dismiss_language_ui(&mut self) {
+        self.lsp.cancel_interactive_requests();
+        self.completion = None;
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.dismiss_overlay();
+            gpu.window().request_redraw();
         }
     }
 
@@ -456,8 +560,11 @@ impl Application {
     }
 
     fn finish_document_transition(&mut self) {
+        self.lsp.cancel_interactive_requests();
+        self.completion = None;
         self.cursor.reset(Instant::now());
         if let Some(gpu) = self.gpu.as_mut() {
+            gpu.dismiss_overlay();
             gpu.set_cursor_visible(self.cursor.is_visible());
             gpu.window().request_redraw();
         }
@@ -558,6 +665,15 @@ impl ApplicationHandler<LspEvent> for Application {
             }
             WindowEvent::Focused(focused) => self.set_cursor_focus(focused),
             WindowEvent::KeyboardInput { event, .. } => {
+                if self.handle_completion_key(&event) {
+                    return;
+                }
+                if event.state == ElementState::Pressed
+                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    self.dismiss_language_ui();
+                    return;
+                }
                 if let Some(input) = self.input.handle_key_event(&event) {
                     match input {
                         KeyInput::Editor(input) => self.apply_input(input),
@@ -583,21 +699,75 @@ impl ApplicationHandler<LspEvent> for Application {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: LspEvent) {
-        let server_stopped = matches!(&event, LspEvent::ServerStopped(_));
-        let Some(update) = self.lsp.handle_event(event) else {
-            if server_stopped && let Some(gpu) = self.gpu.as_mut() {
-                gpu.clear_diagnostics();
-                gpu.window().request_redraw();
-            }
+        let Some(outcome) = self.lsp.handle_event(event) else {
             return;
         };
-        if self
-            .gpu
-            .as_mut()
-            .is_some_and(|gpu| gpu.apply_diagnostics(&update))
-            && let Some(gpu) = self.gpu.as_ref()
-        {
-            gpu.window().request_redraw();
+        match outcome {
+            LspOutcome::Diagnostics(update) => {
+                if self
+                    .gpu
+                    .as_mut()
+                    .is_some_and(|gpu| gpu.apply_diagnostics(&update))
+                    && let Some(gpu) = self.gpu.as_ref()
+                {
+                    gpu.window().request_redraw();
+                }
+            }
+            LspOutcome::Completion(result) => {
+                if result.items.is_empty()
+                    || !self
+                        .gpu
+                        .as_ref()
+                        .is_some_and(|gpu| gpu.active_path_is(&result.path))
+                {
+                    return;
+                }
+                self.completion = Some(CompletionSession {
+                    path: result.path,
+                    items: result.items,
+                    selected: 0,
+                });
+                self.refresh_completion_overlay();
+            }
+            LspOutcome::Hover(result) => {
+                if let Some(gpu) = self.gpu.as_mut()
+                    && gpu.active_path_is(&result.path)
+                {
+                    gpu.show_hover(&result.contents);
+                    gpu.window().request_redraw();
+                }
+            }
+            LspOutcome::Definition(result) => {
+                if !self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|gpu| gpu.active_path_is(&result.source_path))
+                {
+                    return;
+                }
+                let open_result = self
+                    .gpu
+                    .as_mut()
+                    .expect("GPU state exists for definition navigation")
+                    .open_document(result.target_path);
+                if let Err(error) = open_result {
+                    self.show_file_error("Could Not Open Definition", &error.to_string());
+                    return;
+                }
+                self.gpu
+                    .as_mut()
+                    .expect("definition target was opened")
+                    .go_to_position(result.target);
+                self.finish_document_transition();
+            }
+            LspOutcome::ServerStopped => {
+                self.completion = None;
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.dismiss_overlay();
+                    gpu.clear_diagnostics();
+                    gpu.window().request_redraw();
+                }
+            }
         }
     }
 }

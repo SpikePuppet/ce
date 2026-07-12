@@ -15,9 +15,11 @@ use winit::dpi::PhysicalSize;
 
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
-use crate::editor::{CursorRectangle, DiagnosticRectangle, EditorLayout, SelectionRectangle};
+use crate::editor::{
+    CursorRectangle, DiagnosticRectangle, EditorLayout, OverlayGeometry, SelectionRectangle,
+};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
-use crate::lsp::{DiagnosticUpdate, LspDocument};
+use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -327,6 +329,34 @@ impl Renderer {
         self.documents.clear_diagnostics();
     }
 
+    pub fn active_lsp_position(&self) -> Option<(std::path::PathBuf, Position)> {
+        self.documents.active_lsp_position()
+    }
+
+    pub fn apply_completion(&mut self, item: &CompletionItem) -> bool {
+        self.documents.apply_completion(item)
+    }
+
+    pub fn active_path_is(&self, path: &std::path::Path) -> bool {
+        self.documents.active_path_is(path)
+    }
+
+    pub fn go_to_position(&mut self, position: Position) {
+        self.documents.go_to_position(position);
+    }
+
+    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+        self.documents.show_completion(rows, selected);
+    }
+
+    pub fn show_hover(&mut self, contents: &str) {
+        self.documents.show_hover(contents);
+    }
+
+    pub fn dismiss_overlay(&mut self) {
+        self.documents.dismiss_overlay();
+    }
+
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
     }
@@ -412,6 +442,15 @@ impl Renderer {
                         )
                     }),
             );
+        let overlay_geometry = editor.overlay_geometry();
+        if let Some(overlay) = overlay_geometry {
+            self.scene_rectangles.extend(overlay_rectangles(
+                overlay,
+                layout,
+                logical_width,
+                logical_height,
+            ));
+        }
         let cursor_rectangle = self
             .cursor_visible
             .then(|| editor.cursor_rectangle())
@@ -435,7 +474,8 @@ impl Renderer {
         let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
         let editor_left = layout.code_left * scale_factor;
-        let (font_system, swash_cache, tab_labels, line_numbers, code) = editor.render_parts();
+        let (font_system, swash_cache, tab_labels, line_numbers, code, overlay_buffer) =
+            editor.render_parts();
         let line_number_area = TextArea {
             buffer: line_numbers,
             left: 0.0,
@@ -473,6 +513,27 @@ impl Renderer {
             default_color: theme::CURSOR_TEXT,
             custom_glyphs: &[],
         });
+        let overlay_area = overlay_buffer
+            .zip(overlay_geometry)
+            .and_then(|(buffer, geometry)| {
+                let rectangle = translate_editor_rectangle(
+                    geometry.origin,
+                    geometry.size,
+                    layout,
+                    logical_width,
+                    logical_height,
+                    theme::OVERLAY_BACKGROUND,
+                )?;
+                Some(TextArea {
+                    buffer,
+                    left: (rectangle.origin[0] + theme::OVERLAY_PADDING) * scale_factor,
+                    top: (rectangle.origin[1] + theme::OVERLAY_PADDING) * scale_factor,
+                    scale: scale_factor,
+                    bounds: physical_bounds(rectangle, scale_factor),
+                    default_color: theme::OVERLAY_TEXT,
+                    custom_glyphs: &[],
+                })
+            });
         let tab_text_top = (theme::TAB_BAR_HEIGHT - theme::LINE_HEIGHT) * 0.5;
         let tab_areas = (0..tab_count).map(|index| {
             let tab_left = index as f32 * tab_width;
@@ -497,9 +558,14 @@ impl Renderer {
                 custom_glyphs: &[],
             }
         });
-        let editor_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
-            .into_iter()
-            .flatten();
+        let editor_areas = [
+            Some(line_number_area),
+            Some(code_area),
+            cursor_text_area,
+            overlay_area,
+        ]
+        .into_iter()
+        .flatten();
         let text_areas = tab_areas.chain(editor_areas);
 
         self.text_renderer.prepare(
@@ -600,6 +666,58 @@ fn translate_diagnostic_rectangle(
         viewport_height,
         diagnostic.color,
     )
+}
+
+fn overlay_rectangles(
+    overlay: OverlayGeometry,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Vec<Rectangle> {
+    let mut rectangles = Vec::with_capacity(3);
+    if let Some(border) = translate_editor_rectangle(
+        overlay.origin,
+        overlay.size,
+        layout,
+        viewport_width,
+        viewport_height,
+        theme::OVERLAY_BORDER,
+    ) {
+        rectangles.push(border);
+    }
+    let inner_origin = [overlay.origin[0] + 1.0, overlay.origin[1] + 1.0];
+    let inner_size = [
+        (overlay.size[0] - 2.0).max(0.0),
+        (overlay.size[1] - 2.0).max(0.0),
+    ];
+    if let Some(background) = translate_editor_rectangle(
+        inner_origin,
+        inner_size,
+        layout,
+        viewport_width,
+        viewport_height,
+        theme::OVERLAY_BACKGROUND,
+    ) {
+        rectangles.push(background);
+    }
+    if let Some(row) = overlay.selected_row {
+        let origin = [
+            overlay.origin[0] + 1.0,
+            overlay.origin[1] + theme::OVERLAY_PADDING + row as f32 * theme::LINE_HEIGHT,
+        ];
+        let size = [(overlay.size[0] - 2.0).max(0.0), theme::LINE_HEIGHT];
+        if let Some(selection) = translate_editor_rectangle(
+            origin,
+            size,
+            layout,
+            viewport_width,
+            viewport_height,
+            theme::OVERLAY_SELECTION,
+        ) {
+            rectangles.push(selection);
+        }
+    }
+    rectangles
 }
 
 fn translate_editor_rectangle(

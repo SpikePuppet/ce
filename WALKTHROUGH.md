@@ -25,8 +25,8 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 9: Undo and redo | Approved and committed (`f2396e4`) |
 | 10: Tabs | Approved and committed (`152f1ad`) |
 | 11: Python syntax highlighting | Approved and committed (`b31a117`) |
-| 12: Python LSP diagnostics | Implemented; awaiting review |
-| 13: Interactive LSP features | Planned |
+| 12: Python LSP diagnostics | Approved and committed (`53c72af`) |
+| 13: Interactive LSP features | Implemented; awaiting review |
 
 ### Milestone 1 review record
 
@@ -172,6 +172,17 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Error, warning, information, and hint ranges become clipped GPU underline rectangles; any edit clears prior geometry until a fresh diagnostic publication arrives.
 - Shutdown sends `shutdown`, waits briefly for its response, sends `exit`, and only force-terminates the child if it does not exit within the bounded grace period.
 - Formatting, compilation, Clippy with denied warnings, sixty-five tests, and the optimized release build pass. Live Pyright verification remains pending because `pyright-langserver` is not installed on the development machine.
+
+### Milestone 13 review record
+
+- Ctrl+Space requests completions at the active Python cursor; a GPU-rendered menu shows up to eight rows and keeps the selected item visible while Up and Down navigate.
+- Enter and Tab accept the selection as one undoable edit, Escape dismisses it, and server-provided UTF-16 text-edit ranges take precedence over the local identifier-prefix fallback.
+- Cmd+I requests hover information and displays normalized plaintext or markup content in a bounded GPU tooltip near the shaped cursor cell.
+- F12 requests a definition, opens or switches to the target file through the existing tab model, converts its UTF-16 target position, and places the cursor without modifying the document.
+- The completion and hover surfaces reuse the editor's font system, glyph atlas, rectangle batch, Retina conversion, and viewport clipping instead of introducing a second UI toolkit.
+- Every interactive request records its document URI and synchronized version. Edits reject version-stale responses; cursor movement, selection, tab changes, Escape, and superseding requests send `$/cancelRequest` and remove pending identities.
+- Responses also verify that their source path is still active before displaying UI or navigating, preventing a result from one tab from affecting another.
+- Formatting, compilation, Clippy with denied warnings, seventy-one tests, and the optimized release build pass. Live Pyright interaction verification remains pending because `pyright-langserver` is not installed on the development machine.
 
 ## Phase 2 product brief
 
@@ -397,6 +408,31 @@ Review lifecycle failures, stale diagnostics, multiple open tabs, Unicode positi
 - Display hover information.
 - Navigate to definitions, opening or switching documents as needed.
 - Associate responses with document versions so stale asynchronous results cannot replace current UI.
+
+### Controls
+
+- Ctrl+Space opens completion suggestions.
+- Up and Down change the selected completion; Enter or Tab accepts it; Escape closes it.
+- Cmd+I shows hover information for the symbol at the cursor.
+- F12 follows the first definition target.
+
+### Rust concepts
+
+- Correlating asynchronous responses with typed pending-request state
+- Canceling work when non-text interaction invalidates a cursor-specific request
+- Modeling transient UI separately from persistent document state
+- Reusing shaped cursor geometry to anchor popups in editor coordinates
+- Applying protocol text edits through the existing history and syntax-update path
+- Navigating external locations through canonical document ownership
+
+### Verify
+
+- Completion navigation never inserts arrow, Enter, or Tab input into the document while the menu is open.
+- Accepting an item uses its text edit when supplied, otherwise replaces only the current identifier prefix, and one Undo restores the prefix.
+- Hover and completion remain clipped and readable near the right and bottom edges of the window.
+- F12 switches to an already-open target without duplicating its tab and opens a new target through normal file-error handling.
+- Editing, moving, selecting, switching tabs, or making a newer request prevents an older response from appearing.
+- UTF-16 ranges after emoji and other non-BMP characters edit and navigate to the correct UTF-8 byte boundary.
 
 ### Review checkpoint
 

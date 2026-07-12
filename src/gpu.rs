@@ -15,7 +15,7 @@ use winit::window::Window;
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
-use crate::lsp::{DiagnosticUpdate, LspDocument};
+use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
 use crate::render::Renderer;
 use crate::theme;
 
@@ -252,6 +252,34 @@ impl GpuState {
 
     pub fn clear_diagnostics(&mut self) {
         self.renderer.clear_diagnostics();
+    }
+
+    pub fn active_lsp_position(&self) -> Option<(std::path::PathBuf, Position)> {
+        self.renderer.active_lsp_position()
+    }
+
+    pub fn apply_completion(&mut self, item: &CompletionItem) -> bool {
+        self.renderer.apply_completion(item)
+    }
+
+    pub fn active_path_is(&self, path: &std::path::Path) -> bool {
+        self.renderer.active_path_is(path)
+    }
+
+    pub fn go_to_position(&mut self, position: Position) {
+        self.renderer.go_to_position(position);
+    }
+
+    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+        self.renderer.show_completion(rows, selected);
+    }
+
+    pub fn show_hover(&mut self, contents: &str) {
+        self.renderer.show_hover(contents);
+    }
+
+    pub fn dismiss_overlay(&mut self) {
+        self.renderer.dismiss_overlay();
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {

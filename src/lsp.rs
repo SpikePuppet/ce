@@ -13,6 +13,7 @@ use winit::event_loop::EventLoopProxy;
 
 const INITIALIZE_REQUEST_ID: u64 = 1;
 const SHUTDOWN_REQUEST_ID: u64 = 2;
+const FIRST_INTERACTIVE_REQUEST_ID: u64 = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspDocument {
@@ -54,11 +55,62 @@ pub struct DiagnosticUpdate {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionItem {
+    pub label: String,
+    pub detail: Option<String>,
+    pub insert_text: String,
+    pub edit_range: Option<Range>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionResult {
+    pub path: PathBuf,
+    pub items: Vec<CompletionItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoverResult {
+    pub path: PathBuf,
+    pub contents: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefinitionResult {
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub target: Position,
+}
+
+#[derive(Debug)]
+pub enum LspOutcome {
+    Diagnostics(DiagnosticUpdate),
+    Completion(CompletionResult),
+    Hover(HoverResult),
+    Definition(DefinitionResult),
+    ServerStopped,
+}
+
 #[derive(Debug)]
 pub enum LspEvent {
     Initialized,
     Diagnostics(DiagnosticUpdate),
+    Response { id: u64, result: Value },
     ServerStopped(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestKind {
+    Completion,
+    Hover,
+    Definition,
+}
+
+struct PendingRequest {
+    kind: RequestKind,
+    path: PathBuf,
+    uri: String,
+    version: i64,
 }
 
 #[derive(Debug)]
@@ -178,8 +230,17 @@ impl LspServer {
                     "clientInfo": { "name": "editor", "version": env!("CARGO_PKG_VERSION") },
                     "rootUri": root_uri.as_str(),
                     "capabilities": {
+                        "general": { "positionEncodings": ["utf-16"] },
                         "textDocument": {
-                            "publishDiagnostics": { "versionSupport": true }
+                            "publishDiagnostics": { "versionSupport": true },
+                            "completion": {
+                                "completionItem": {
+                                    "snippetSupport": false,
+                                    "documentationFormat": ["plaintext"]
+                                }
+                            },
+                            "hover": { "contentFormat": ["plaintext"] },
+                            "definition": { "linkSupport": true }
                         }
                     }
                 }
@@ -230,6 +291,8 @@ pub struct LspManager {
     synced: HashMap<String, SyncedDocument>,
     ready: bool,
     attempted_start: bool,
+    next_request_id: u64,
+    pending: HashMap<u64, PendingRequest>,
 }
 
 impl LspManager {
@@ -241,6 +304,8 @@ impl LspManager {
             synced: HashMap::new(),
             ready: false,
             attempted_start: false,
+            next_request_id: FIRST_INTERACTIVE_REQUEST_ID,
+            pending: HashMap::new(),
         }
     }
 
@@ -269,7 +334,7 @@ impl LspManager {
         Ok(())
     }
 
-    pub fn handle_event(&mut self, event: LspEvent) -> Option<DiagnosticUpdate> {
+    pub fn handle_event(&mut self, event: LspEvent) -> Option<LspOutcome> {
         match event {
             LspEvent::Initialized => {
                 self.ready = true;
@@ -292,18 +357,56 @@ impl LspManager {
                 {
                     None
                 } else {
-                    Some(update)
+                    Some(LspOutcome::Diagnostics(update))
                 }
             }
+            LspEvent::Response { id, result } => self.handle_response(id, &result),
             LspEvent::ServerStopped(reason) => {
                 eprintln!("language server stopped: {reason}");
                 self.ready = false;
                 self.server = None;
                 self.synced.clear();
+                self.pending.clear();
                 self.attempted_start = false;
-                None
+                Some(LspOutcome::ServerStopped)
             }
         }
+    }
+
+    pub fn request_completion(&mut self, path: &Path, position: Position) {
+        self.request(
+            path,
+            position,
+            RequestKind::Completion,
+            "textDocument/completion",
+        );
+    }
+
+    pub fn request_hover(&mut self, path: &Path, position: Position) {
+        self.request(path, position, RequestKind::Hover, "textDocument/hover");
+    }
+
+    pub fn request_definition(&mut self, path: &Path, position: Position) {
+        self.request(
+            path,
+            position,
+            RequestKind::Definition,
+            "textDocument/definition",
+        );
+    }
+
+    pub fn cancel_interactive_requests(&mut self) {
+        let ids = self.pending.keys().copied().collect::<Vec<_>>();
+        if let Some(server) = &self.server {
+            for id in &ids {
+                server.send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "$/cancelRequest",
+                    "params": { "id": id }
+                }));
+            }
+        }
+        self.pending.clear();
     }
 
     pub fn did_save(&self, path: &Path) {
@@ -382,6 +485,69 @@ impl LspManager {
             }
         }
     }
+
+    fn request(&mut self, path: &Path, position: Position, kind: RequestKind, method: &str) {
+        if !self.ready {
+            return;
+        }
+        let Ok(uri) = Url::from_file_path(path).map(|url| url.to_string()) else {
+            return;
+        };
+        let Some(document) = self.synced.get(&uri) else {
+            return;
+        };
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending.insert(
+            id,
+            PendingRequest {
+                kind,
+                path: path.to_path_buf(),
+                uri: uri.clone(),
+                version: document.version,
+            },
+        );
+        if let Some(server) = &self.server {
+            server.send(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character }
+                }
+            }));
+        }
+    }
+
+    fn handle_response(&mut self, id: u64, result: &Value) -> Option<LspOutcome> {
+        let pending = self.pending.remove(&id)?;
+        let current = self.synced.get(&pending.uri)?;
+        if current.version != pending.version {
+            return None;
+        }
+        match pending.kind {
+            RequestKind::Completion => Some(LspOutcome::Completion(CompletionResult {
+                path: pending.path,
+                items: parse_completion_items(result),
+            })),
+            RequestKind::Hover => {
+                let contents = parse_hover_contents(result)?;
+                Some(LspOutcome::Hover(HoverResult {
+                    path: pending.path,
+                    contents,
+                }))
+            }
+            RequestKind::Definition => {
+                let (target_path, target) = parse_definition(result)?;
+                Some(LspOutcome::Definition(DefinitionResult {
+                    source_path: pending.path,
+                    target_path,
+                    target,
+                }))
+            }
+        }
+    }
 }
 
 fn project_root(path: &Path) -> PathBuf {
@@ -406,6 +572,14 @@ fn handle_server_message(
         && message.get("result").is_some()
     {
         let _ = proxy.send_event(LspEvent::Initialized);
+        return;
+    }
+
+    if let Some(id) = message.get("id").and_then(Value::as_u64)
+        && message.get("method").is_none()
+    {
+        let result = message.get("result").cloned().unwrap_or(Value::Null);
+        let _ = proxy.send_event(LspEvent::Response { id, result });
         return;
     }
 
@@ -474,6 +648,106 @@ fn parse_diagnostics(message: &Value) -> Option<DiagnosticUpdate> {
     })
 }
 
+fn parse_completion_items(result: &Value) -> Vec<CompletionItem> {
+    let values = result
+        .as_array()
+        .or_else(|| result.get("items").and_then(Value::as_array));
+    values
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let label = value.get("label")?.as_str()?.to_owned();
+            let text_edit = value.get("textEdit");
+            let insert_text = text_edit
+                .and_then(|edit| edit.get("newText"))
+                .and_then(Value::as_str)
+                .or_else(|| value.get("insertText").and_then(Value::as_str))
+                .unwrap_or(&label)
+                .to_owned();
+            let edit_range = text_edit.and_then(|edit| {
+                edit.get("range")
+                    .or_else(|| edit.get("replace"))
+                    .and_then(parse_range)
+            });
+            Some(CompletionItem {
+                label,
+                detail: value
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                insert_text,
+                edit_range,
+            })
+        })
+        .collect()
+}
+
+fn parse_hover_contents(result: &Value) -> Option<String> {
+    if result.is_null() {
+        return None;
+    }
+    let contents = result.get("contents").unwrap_or(result);
+    let mut parts = Vec::new();
+    collect_hover_parts(contents, &mut parts);
+    let text = parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn collect_hover_parts(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => parts.push(text.clone()),
+        Value::Array(values) => {
+            for value in values {
+                collect_hover_parts(value, parts);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(text) = object.get("value").and_then(Value::as_str) {
+                parts.push(text.to_owned());
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn parse_definition(result: &Value) -> Option<(PathBuf, Position)> {
+    let location = result
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(result);
+    if location.is_null() {
+        return None;
+    }
+    let uri = location
+        .get("uri")
+        .or_else(|| location.get("targetUri"))?
+        .as_str()?;
+    let range = location
+        .get("range")
+        .or_else(|| location.get("targetSelectionRange"))
+        .or_else(|| location.get("targetRange"))?;
+    let path = Url::parse(uri).ok()?.to_file_path().ok()?;
+    Some((path, parse_position(range.get("start")?)?))
+}
+
+fn parse_range(value: &Value) -> Option<Range> {
+    Some(Range {
+        start: parse_position(value.get("start")?)?,
+        end: parse_position(value.get("end")?)?,
+    })
+}
+
+fn parse_position(value: &Value) -> Option<Position> {
+    Some(Position {
+        line: usize::try_from(value.get("line")?.as_u64()?).ok()?,
+        character: usize::try_from(value.get("character")?.as_u64()?).ok()?,
+    })
+}
+
 fn write_message(writer: &mut impl Write, message: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(message).map_err(io::Error::other)?;
     write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
@@ -515,7 +789,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{DiagnosticSeverity, parse_diagnostics, project_root, read_message, write_message};
+    use super::{
+        DiagnosticSeverity, Position, parse_completion_items, parse_definition, parse_diagnostics,
+        parse_hover_contents, project_root, read_message, write_message,
+    };
 
     #[test]
     fn json_rpc_messages_round_trip_with_content_length_framing() {
@@ -562,5 +839,60 @@ mod tests {
 
         assert_eq!(project_root(&nested.join("main.py")), root);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completion_items_use_server_text_edits_when_present() {
+        let result = json!({
+            "items": [{
+                "label": "print",
+                "detail": "built-in function",
+                "insertText": "ignored",
+                "textEdit": {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 2}
+                    },
+                    "newText": "print"
+                }
+            }]
+        });
+
+        let items = parse_completion_items(&result);
+        assert_eq!(items[0].insert_text, "print");
+        assert_eq!(items[0].detail.as_deref(), Some("built-in function"));
+        assert_eq!(items[0].edit_range.unwrap().end.character, 2);
+    }
+
+    #[test]
+    fn hover_markup_and_definition_links_are_normalized() {
+        let hover = json!({
+            "contents": [
+                {"language": "python", "value": "def greet(name: str) -> str"},
+                {"kind": "plaintext", "value": "Returns a greeting."}
+            ]
+        });
+        assert_eq!(
+            parse_hover_contents(&hover).as_deref(),
+            Some("def greet(name: str) -> str\n\nReturns a greeting.")
+        );
+
+        let definition = json!({
+            "targetUri": "file:///tmp/library.py",
+            "targetSelectionRange": {
+                "start": {"line": 4, "character": 2},
+                "end": {"line": 4, "character": 7}
+            }
+        });
+        assert_eq!(
+            parse_definition(&definition),
+            Some((
+                std::path::PathBuf::from("/tmp/library.py"),
+                Position {
+                    line: 4,
+                    character: 2
+                }
+            ))
+        );
     }
 }

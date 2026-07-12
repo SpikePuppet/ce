@@ -10,7 +10,7 @@ use glyphon::Action;
 use crate::clipboard::ClipboardProvider;
 use crate::editor::{DiagnosticSpan, EditorChange, EditorState};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
-use crate::lsp::{DiagnosticUpdate, LspDocument, Position};
+use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
 use crate::syntax::SyntaxState;
 
 const UNTITLED_NAME: &str = "Untitled";
@@ -527,6 +527,69 @@ impl Documents {
         }
     }
 
+    pub fn active_lsp_position(&self) -> Option<(PathBuf, Position)> {
+        let document = &self.items[self.active];
+        let path = document.path.as_ref()?;
+        if !is_python_path(path) {
+            return None;
+        }
+        let cursor = document.editor.cursor();
+        let text = document.editor.text();
+        let (line_start, line_end) = line_byte_range(&text, cursor.line)?;
+        let byte = (line_start + cursor.index).min(line_end);
+        let character = text[line_start..byte].encode_utf16().count();
+        Some((
+            path.clone(),
+            Position {
+                line: cursor.line,
+                character,
+            },
+        ))
+    }
+
+    pub fn apply_completion(&mut self, item: &CompletionItem) -> bool {
+        let document = &mut self.items[self.active];
+        let text = document.editor.text();
+        let range = item.edit_range.map_or_else(
+            || completion_prefix_range(&text, document.editor.cursor()),
+            |range| {
+                utf16_position_to_byte(&text, range.start)..utf16_position_to_byte(&text, range.end)
+            },
+        );
+        document.editor.select_byte_range(range);
+        let changed =
+            document.apply_standalone_input(EditorInput::InsertText(item.insert_text.clone()));
+        if changed {
+            self.refresh_tab_labels();
+        }
+        changed
+    }
+
+    pub fn active_path_is(&self, path: &Path) -> bool {
+        self.items[self.active].path.as_deref() == Some(path)
+    }
+
+    pub fn go_to_position(&mut self, position: Position) {
+        let document = &mut self.items[self.active];
+        let byte = utf16_position_to_byte(&document.editor.text(), position);
+        document.history.break_group();
+        document.editor.set_cursor_byte_offset(byte);
+    }
+
+    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+        self.items[self.active]
+            .editor
+            .show_completion(rows, selected);
+    }
+
+    pub fn show_hover(&mut self, contents: &str) {
+        self.items[self.active].editor.show_hover(contents);
+    }
+
+    pub fn dismiss_overlay(&mut self) {
+        self.items[self.active].editor.dismiss_overlay();
+    }
+
     fn refresh_tab_labels(&mut self) {
         self.tab_labels.clear();
         for (index, document) in self.items.iter().enumerate() {
@@ -578,6 +641,49 @@ fn utf16_position_to_byte(text: &str, position: Position) -> usize {
     }
 }
 
+fn line_byte_range(text: &str, target: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut line = 0;
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ending_length = match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if line == target {
+            return Some((start, index));
+        }
+        line += 1;
+        index += ending_length;
+        start = index;
+    }
+    (line == target).then_some((start, text.len()))
+}
+
+fn completion_prefix_range(
+    text: &str,
+    cursor: glyphon::cosmic_text::Cursor,
+) -> std::ops::Range<usize> {
+    let (line_start, line_end) =
+        line_byte_range(text, cursor.line).unwrap_or((text.len(), text.len()));
+    let end = (line_start + cursor.index).min(line_end);
+    let prefix = &text[line_start..end];
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find_map(|(byte, character)| {
+            (!(character == '_' || character.is_alphanumeric()))
+                .then_some(line_start + byte + character.len_utf8())
+        })
+        .unwrap_or(line_start);
+    start..end
+}
+
 fn utf16_column_to_byte(line: &str, column: usize) -> usize {
     let mut utf16 = 0;
     for (byte, character) in line.char_indices() {
@@ -611,7 +717,7 @@ mod tests {
     use super::{Documents, utf16_position_to_byte};
     use crate::clipboard::ClipboardProvider;
     use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
-    use crate::lsp::Position;
+    use crate::lsp::{CompletionItem, Position, Range};
 
     #[test]
     fn lsp_utf16_positions_map_to_utf8_byte_offsets() {
@@ -675,6 +781,46 @@ mod tests {
             ),
             8
         );
+    }
+
+    #[test]
+    fn completion_replaces_the_identifier_prefix_as_one_undoable_edit() {
+        let mut documents = Documents::new();
+        documents.apply_input(EditorInput::InsertText("pri".to_owned()));
+        documents.items[documents.active].history.mark_saved();
+
+        assert!(documents.apply_completion(&CompletionItem {
+            label: "print".to_owned(),
+            detail: None,
+            insert_text: "print".to_owned(),
+            edit_range: None,
+        }));
+        assert_eq!(active_text(&documents), "print");
+        assert!(documents.apply_history_command(HistoryCommand::Undo));
+        assert_eq!(active_text(&documents), "pri");
+    }
+
+    #[test]
+    fn completion_text_edits_use_utf16_ranges() {
+        let mut documents = Documents::new();
+        documents.apply_input(EditorInput::InsertText("🦀 pri".to_owned()));
+
+        assert!(documents.apply_completion(&CompletionItem {
+            label: "print".to_owned(),
+            detail: None,
+            insert_text: "print".to_owned(),
+            edit_range: Some(Range {
+                start: Position {
+                    line: 0,
+                    character: 3,
+                },
+                end: Position {
+                    line: 0,
+                    character: 6,
+                },
+            }),
+        }));
+        assert_eq!(active_text(&documents), "🦀 print");
     }
 
     #[derive(Default)]

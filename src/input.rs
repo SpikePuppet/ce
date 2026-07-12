@@ -45,11 +45,19 @@ pub enum HistoryCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LanguageCommand {
+    Completion,
+    Hover,
+    GoToDefinition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     File(FileCommand),
     Editor(EditorCommand),
     Clipboard(ClipboardCommand),
     History(HistoryCommand),
+    Language(LanguageCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,7 +147,24 @@ fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
         .map(Command::File)
         .or_else(|| history_command(key, modifiers).map(Command::History))
         .or_else(|| clipboard_command(key, modifiers).map(Command::Clipboard))
+        .or_else(|| language_command(key, modifiers).map(Command::Language))
         .or_else(|| editor_command(key, modifiers).map(Command::Editor))
+}
+
+fn language_command(key: &Key, modifiers: ModifiersState) -> Option<LanguageCommand> {
+    if modifiers == ModifiersState::CONTROL
+        && matches!(key, Key::Character(character) if character == " ")
+    {
+        Some(LanguageCommand::Completion)
+    } else if modifiers == ModifiersState::SUPER
+        && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("i"))
+    {
+        Some(LanguageCommand::Hover)
+    } else if modifiers.is_empty() && matches!(key, Key::Named(NamedKey::F12)) {
+        Some(LanguageCommand::GoToDefinition)
+    } else {
+        None
+    }
 }
 
 fn history_command(key: &Key, modifiers: ModifiersState) -> Option<HistoryCommand> {
@@ -292,7 +317,7 @@ mod tests {
 
     use super::{
         ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand,
-        InputState, command_for_key, file_command, text_input,
+        InputState, LanguageCommand, command_for_key, file_command, text_input,
     };
 
     #[test]
@@ -372,6 +397,22 @@ mod tests {
         assert_eq!(
             command_for_key(&Key::Character("v".into()), ModifiersState::SUPER),
             Some(Command::Clipboard(ClipboardCommand::Paste))
+        );
+    }
+
+    #[test]
+    fn language_shortcuts_map_to_explicit_commands() {
+        assert_eq!(
+            command_for_key(&Key::Character(" ".into()), ModifiersState::CONTROL),
+            Some(Command::Language(LanguageCommand::Completion))
+        );
+        assert_eq!(
+            command_for_key(&Key::Character("i".into()), ModifiersState::SUPER),
+            Some(Command::Language(LanguageCommand::Hover))
+        );
+        assert_eq!(
+            command_for_key(&Key::Named(NamedKey::F12), ModifiersState::empty()),
+            Some(Command::Language(LanguageCommand::GoToDefinition))
         );
     }
 

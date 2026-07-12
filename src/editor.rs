@@ -42,6 +42,19 @@ pub struct DiagnosticRectangle {
     pub color: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayGeometry {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub selected_row: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum OverlayKind {
+    Completion { selected_row: usize },
+    Hover,
+}
+
 #[derive(Clone, Copy)]
 struct PositionedDiagnostic {
     start: Cursor,
@@ -76,6 +89,9 @@ pub struct EditorState {
     font_system: FontSystem,
     swash_cache: SwashCache,
     tab_labels: Buffer,
+    overlay_buffer: Buffer,
+    overlay_kind: Option<OverlayKind>,
+    overlay_rows: usize,
     tab_label_text: String,
     line_numbers: Buffer,
     editor: Editor<'static>,
@@ -111,10 +127,17 @@ impl EditorState {
         tab_labels.set_wrap(Wrap::None);
         tab_labels.set_text("Untitled", &attrs, Shaping::Advanced, None);
 
+        let mut overlay_buffer = Buffer::new(&mut font_system, metrics);
+        overlay_buffer.set_wrap(Wrap::None);
+        overlay_buffer.set_text("", &attrs, Shaping::Advanced, None);
+
         Self {
             font_system,
             swash_cache,
             tab_labels,
+            overlay_buffer,
+            overlay_kind: None,
+            overlay_rows: 0,
             tab_label_text: "Untitled".to_owned(),
             line_numbers,
             editor,
@@ -194,6 +217,30 @@ impl EditorState {
         self.editor.copy_selection()
     }
 
+    pub fn cursor(&self) -> Cursor {
+        self.editor.cursor()
+    }
+
+    pub fn select_byte_range(&mut self, range: std::ops::Range<usize>) {
+        let (start, end) = self.editor.with_buffer(|buffer| {
+            (
+                cursor_for_byte_offset(buffer, range.start),
+                cursor_for_byte_offset(buffer, range.end),
+            )
+        });
+        self.editor.set_selection(Selection::Normal(start));
+        self.editor.set_cursor(end);
+    }
+
+    pub fn set_cursor_byte_offset(&mut self, offset: usize) {
+        let cursor = self
+            .editor
+            .with_buffer(|buffer| cursor_for_byte_offset(buffer, offset));
+        self.editor.set_selection(Selection::None);
+        self.editor.set_cursor(cursor);
+        self.shape_and_sync_scroll();
+    }
+
     pub fn set_tab_labels(&mut self, labels: &str) {
         if self.tab_label_text == labels {
             return;
@@ -204,6 +251,87 @@ impl EditorState {
             .set_text(labels, &text_attributes(), Shaping::Advanced, None);
         self.tab_labels
             .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+        const MAX_ROWS: usize = 8;
+        let start = selected.saturating_sub(MAX_ROWS - 1);
+        let visible = rows.iter().skip(start).take(MAX_ROWS).collect::<Vec<_>>();
+        let text = visible
+            .iter()
+            .map(|row| row.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.overlay_rows = visible.len();
+        self.overlay_kind = Some(OverlayKind::Completion {
+            selected_row: selected.saturating_sub(start),
+        });
+        self.overlay_buffer.set_size(
+            Some(theme::COMPLETION_WIDTH - 2.0 * theme::OVERLAY_PADDING),
+            Some((self.overlay_rows as f32 * theme::LINE_HEIGHT).max(theme::LINE_HEIGHT)),
+        );
+        self.overlay_buffer
+            .set_text(&text, &text_attributes(), Shaping::Advanced, None);
+        self.overlay_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    pub fn show_hover(&mut self, contents: &str) {
+        const MAX_LINES: usize = 10;
+        const MAX_CHARACTERS: usize = 80;
+        let text = contents
+            .lines()
+            .filter(|line| !line.trim().starts_with("```"))
+            .take(MAX_LINES)
+            .map(|line| line.chars().take(MAX_CHARACTERS).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.overlay_rows = text.lines().count().max(1);
+        self.overlay_kind = Some(OverlayKind::Hover);
+        self.overlay_buffer.set_size(
+            Some(theme::HOVER_WIDTH - 2.0 * theme::OVERLAY_PADDING),
+            Some(self.overlay_rows as f32 * theme::LINE_HEIGHT),
+        );
+        self.overlay_buffer
+            .set_text(&text, &text_attributes(), Shaping::Advanced, None);
+        self.overlay_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    pub fn dismiss_overlay(&mut self) {
+        self.overlay_kind = None;
+        self.overlay_rows = 0;
+    }
+
+    pub fn overlay_geometry(&self) -> Option<OverlayGeometry> {
+        let kind = self.overlay_kind?;
+        let cursor = self.cursor_rectangle?;
+        let (window_width, window_height) = self.logical_size?;
+        let layout = self.layout();
+        let width = match kind {
+            OverlayKind::Completion { .. } => theme::COMPLETION_WIDTH,
+            OverlayKind::Hover => theme::HOVER_WIDTH,
+        };
+        let height = self.overlay_rows as f32 * theme::LINE_HEIGHT + 2.0 * theme::OVERLAY_PADDING;
+        let editor_width =
+            (window_width - layout.code_left - theme::CONTENT_RIGHT_PADDING).max(1.0);
+        let editor_height =
+            (window_height - theme::CONTENT_TOP - theme::CONTENT_BOTTOM_PADDING).max(1.0);
+        let x = cursor.origin[0].min((editor_width - width).max(0.0));
+        let below = cursor.origin[1] + cursor.size[1] + 4.0;
+        let y = if below + height <= editor_height {
+            below
+        } else {
+            (cursor.origin[1] - height - 4.0).max(0.0)
+        };
+        Some(OverlayGeometry {
+            origin: [x, y],
+            size: [width.min(editor_width), height.min(editor_height)],
+            selected_row: match kind {
+                OverlayKind::Completion { selected_row } => Some(selected_row),
+                OverlayKind::Hover => None,
+            },
+        })
     }
 
     pub fn apply_highlights(&mut self, spans: &[HighlightSpan]) {
@@ -318,7 +446,14 @@ impl EditorState {
 
     pub fn render_parts(
         &mut self,
-    ) -> (&mut FontSystem, &mut SwashCache, &Buffer, &Buffer, &Buffer) {
+    ) -> (
+        &mut FontSystem,
+        &mut SwashCache,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        Option<&Buffer>,
+    ) {
         let code = match self.editor.buffer_ref() {
             BufferRef::Owned(buffer) => buffer,
             BufferRef::Borrowed(buffer) => buffer,
@@ -331,6 +466,7 @@ impl EditorState {
             &self.tab_labels,
             &self.line_numbers,
             code,
+            self.overlay_kind.map(|_| &self.overlay_buffer),
         )
     }
 
@@ -736,6 +872,23 @@ mod tests {
 
         editor.clear_diagnostics();
         assert!(editor.diagnostic_rectangles().is_empty());
+    }
+
+    #[test]
+    fn completion_overlay_tracks_selection_and_dismisses() {
+        let mut editor = EditorState::with_text("pri");
+        editor.resize(640.0, 400.0);
+        let rows = (0..10)
+            .map(|index| format!("item {index}"))
+            .collect::<Vec<_>>();
+        editor.show_completion(&rows, 9);
+
+        let geometry = editor.overlay_geometry().expect("completion is visible");
+        assert_eq!(geometry.selected_row, Some(7));
+        assert_eq!(editor.overlay_rows, 8);
+
+        editor.dismiss_overlay();
+        assert!(editor.overlay_geometry().is_none());
     }
 
     #[test]
