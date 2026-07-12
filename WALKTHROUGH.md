@@ -187,6 +187,15 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Responses also verify that their source path is still active before displaying UI or navigating, preventing a result from one tab from affecting another.
 - Formatting, compilation, Clippy with denied warnings, seventy-one tests, and the optimized release build pass. Live Pyright interaction verification remains pending because `pyright-langserver` is not installed on the development machine.
 
+### Milestone 13 refinement record
+
+- The completion surface uses a stable two-pane footprint: suggestions remain on the left and documentation updates independently on the right, so lazy documentation cannot resize or relocate the menu.
+- Suggestion and documentation buffers cache their last text; moving within the visible window normally updates only the selected GPU rectangle instead of resetting and reshaping every popup glyph.
+- Mouse-wheel line deltas and Retina-correct trackpad pixel deltas scroll the document vertically and horizontally while preserving its cursor and selection.
+- While completion is open, the same vertical deltas navigate its full item list; fractional trackpad movement accumulates until it crosses one row and selection remains clamped at both ends.
+- Line numbers mirror manual vertical scrolling, while horizontal movement remains isolated to code.
+- Formatting, compilation, Clippy with denied warnings, seventy-four tests, and the optimized release build pass.
+
 ## Phase 2 product brief
 
 Phase 2 turns the scratch editor into a small Python-focused working editor. Its document model grows into tabs, its input mapping grows into standard macOS editing commands, and language intelligence is layered in locally with Tree-sitter and externally through LSP.

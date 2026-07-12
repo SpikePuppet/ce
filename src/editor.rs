@@ -47,6 +47,8 @@ pub struct OverlayGeometry {
     pub origin: [f32; 2],
     pub size: [f32; 2],
     pub selected_row: Option<usize>,
+    pub selection_width: f32,
+    pub has_documentation_pane: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -54,7 +56,6 @@ enum OverlayKind {
     Completion {
         selected_row: usize,
         first_item: usize,
-        has_documentation: bool,
     },
     Hover,
 }
@@ -94,6 +95,9 @@ pub struct EditorState {
     swash_cache: SwashCache,
     tab_labels: Buffer,
     overlay_buffer: Buffer,
+    overlay_documentation_buffer: Buffer,
+    overlay_text: String,
+    overlay_documentation_text: String,
     overlay_kind: Option<OverlayKind>,
     overlay_rows: usize,
     overlay_menu_rows: usize,
@@ -135,12 +139,18 @@ impl EditorState {
         let mut overlay_buffer = Buffer::new(&mut font_system, metrics);
         overlay_buffer.set_wrap(Wrap::None);
         overlay_buffer.set_text("", &attrs, Shaping::Advanced, None);
+        let mut overlay_documentation_buffer = Buffer::new(&mut font_system, metrics);
+        overlay_documentation_buffer.set_wrap(Wrap::None);
+        overlay_documentation_buffer.set_text("", &attrs, Shaping::Advanced, None);
 
         Self {
             font_system,
             swash_cache,
             tab_labels,
             overlay_buffer,
+            overlay_documentation_buffer,
+            overlay_text: String::new(),
+            overlay_documentation_text: String::new(),
             overlay_kind: None,
             overlay_rows: 0,
             overlay_menu_rows: 0,
@@ -189,6 +199,14 @@ impl EditorState {
                 self.editor
                     .borrow_with(&mut self.font_system)
                     .action(Action::Drag { x, y });
+            }
+            EditorInput::Scroll([horizontal, vertical]) => {
+                self.editor.with_buffer_mut(|buffer| {
+                    let mut scroll = buffer.scroll();
+                    scroll.horizontal = (scroll.horizontal + horizontal).max(0.0);
+                    scroll.vertical += vertical;
+                    buffer.set_scroll(scroll);
+                });
             }
         }
         let change = self
@@ -268,39 +286,29 @@ impl EditorState {
         const MAX_ROWS: usize = 8;
         let start = selected.saturating_sub(MAX_ROWS - 1);
         let visible = rows.iter().skip(start).take(MAX_ROWS).collect::<Vec<_>>();
-        let mut lines = visible
+        let lines = visible
             .iter()
             .map(|row| row.to_string())
             .collect::<Vec<_>>();
         self.overlay_menu_rows = visible.len();
         let documentation = documentation
-            .map(|contents| normalized_overlay_lines(contents, 8, 80))
-            .filter(|lines| !lines.is_empty());
-        if let Some(documentation) = &documentation {
-            lines.push("─".repeat(48));
-            lines.extend(documentation.iter().cloned());
-        }
+            .map(|contents| normalized_overlay_lines(contents, MAX_ROWS, 56).join("\n"))
+            .unwrap_or_default();
         let text = lines.join("\n");
-        self.overlay_rows = lines.len();
+        self.overlay_rows = self.overlay_menu_rows.max(1);
         self.overlay_kind = Some(OverlayKind::Completion {
             selected_row: selected.saturating_sub(start),
             first_item: start,
-            has_documentation: documentation.is_some(),
         });
         self.overlay_buffer.set_size(
-            Some(
-                if documentation.is_some() {
-                    theme::HOVER_WIDTH
-                } else {
-                    theme::COMPLETION_WIDTH
-                } - 2.0 * theme::OVERLAY_PADDING,
-            ),
+            Some(theme::COMPLETION_WIDTH - 2.0 * theme::OVERLAY_PADDING),
             Some((self.overlay_rows as f32 * theme::LINE_HEIGHT).max(theme::LINE_HEIGHT)),
         );
-        self.overlay_buffer
-            .set_text(&text, &text_attributes(), Shaping::Advanced, None);
-        self.overlay_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.overlay_documentation_buffer.set_size(
+            Some(theme::COMPLETION_DOCUMENTATION_WIDTH - 2.0 * theme::OVERLAY_PADDING),
+            Some(self.overlay_rows as f32 * theme::LINE_HEIGHT),
+        );
+        self.update_overlay_text(text, documentation);
     }
 
     pub fn show_hover(&mut self, contents: &str) {
@@ -312,10 +320,7 @@ impl EditorState {
             Some(theme::HOVER_WIDTH - 2.0 * theme::OVERLAY_PADDING),
             Some(self.overlay_rows as f32 * theme::LINE_HEIGHT),
         );
-        self.overlay_buffer
-            .set_text(&text, &text_attributes(), Shaping::Advanced, None);
-        self.overlay_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.update_overlay_text(text, String::new());
     }
 
     pub fn dismiss_overlay(&mut self) {
@@ -330,14 +335,8 @@ impl EditorState {
         let (window_width, window_height) = self.logical_size?;
         let layout = self.layout();
         let width = match kind {
-            OverlayKind::Completion {
-                has_documentation, ..
-            } => {
-                if has_documentation {
-                    theme::HOVER_WIDTH
-                } else {
-                    theme::COMPLETION_WIDTH
-                }
+            OverlayKind::Completion { .. } => {
+                theme::COMPLETION_WIDTH + theme::COMPLETION_DOCUMENTATION_WIDTH
             }
             OverlayKind::Hover => theme::HOVER_WIDTH,
         };
@@ -360,6 +359,11 @@ impl EditorState {
                 OverlayKind::Completion { selected_row, .. } => Some(selected_row),
                 OverlayKind::Hover => None,
             },
+            selection_width: match kind {
+                OverlayKind::Completion { .. } => theme::COMPLETION_WIDTH,
+                OverlayKind::Hover => width,
+            },
+            has_documentation_pane: matches!(kind, OverlayKind::Completion { .. }),
         })
     }
 
@@ -371,7 +375,7 @@ impl EditorState {
         let layout = self.layout();
         let left = layout.code_left + geometry.origin[0];
         let top = theme::CONTENT_TOP + geometry.origin[1] + theme::OVERLAY_PADDING;
-        let right = left + geometry.size[0];
+        let right = left + geometry.selection_width.min(geometry.size[0]);
         let bottom = top + self.overlay_menu_rows as f32 * theme::LINE_HEIGHT;
         if position[0] < left || position[0] >= right || position[1] < top || position[1] >= bottom
         {
@@ -392,6 +396,31 @@ impl EditorState {
             && position[0] < left + geometry.size[0]
             && position[1] >= top
             && position[1] < top + geometry.size[1]
+    }
+
+    fn update_overlay_text(&mut self, text: String, documentation: String) {
+        if self.overlay_text != text {
+            self.overlay_text = text;
+            self.overlay_buffer.set_text(
+                &self.overlay_text,
+                &text_attributes(),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+        if self.overlay_documentation_text != documentation {
+            self.overlay_documentation_text = documentation;
+            self.overlay_documentation_buffer.set_text(
+                &self.overlay_documentation_text,
+                &text_attributes(),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_documentation_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
     }
 
     pub fn apply_highlights(&mut self, spans: &[HighlightSpan]) {
@@ -513,6 +542,7 @@ impl EditorState {
         &Buffer,
         &Buffer,
         Option<&Buffer>,
+        Option<&Buffer>,
     ) {
         let code = match self.editor.buffer_ref() {
             BufferRef::Owned(buffer) => buffer,
@@ -527,6 +557,8 @@ impl EditorState {
             &self.line_numbers,
             code,
             self.overlay_kind.map(|_| &self.overlay_buffer),
+            matches!(self.overlay_kind, Some(OverlayKind::Completion { .. }))
+                .then_some(&self.overlay_documentation_buffer),
         )
     }
 
@@ -959,7 +991,9 @@ mod tests {
         let geometry = editor.overlay_geometry().expect("completion is visible");
         assert_eq!(geometry.selected_row, Some(7));
         assert_eq!(editor.overlay_menu_rows, 8);
-        assert!(editor.overlay_rows > editor.overlay_menu_rows);
+        assert_eq!(editor.overlay_rows, editor.overlay_menu_rows);
+        assert_eq!(geometry.selection_width, crate::theme::COMPLETION_WIDTH);
+        assert!(geometry.has_documentation_pane);
         let hovered = editor.completion_item_at_position([
             editor.layout().code_left + geometry.origin[0] + 4.0,
             crate::theme::CONTENT_TOP
@@ -974,8 +1008,38 @@ mod tests {
             crate::theme::CONTENT_TOP + geometry.origin[1] + geometry.size[1] - 2.0,
         ]));
 
+        editor.show_completion(&rows, 0, Some("Documentation for item 0."));
+        let text_before_selection_change = editor.overlay_text.clone();
+        let geometry_with_documentation = editor.overlay_geometry().unwrap();
+        editor.show_completion(&rows, 1, None);
+        assert_eq!(editor.overlay_text, text_before_selection_change);
+        assert_eq!(
+            editor.overlay_geometry().unwrap().size,
+            geometry_with_documentation.size
+        );
+
         editor.dismiss_overlay();
         assert!(editor.overlay_geometry().is_none());
+    }
+
+    #[test]
+    fn scroll_input_moves_code_and_line_numbers_without_moving_the_cursor() {
+        let text = (0..20)
+            .map(|index| format!("{index}: {}", "x".repeat(80)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut editor = EditorState::with_text(&text);
+        editor.resize(240.0, 120.0);
+        let cursor = editor.cursor();
+
+        editor.apply_input(EditorInput::Scroll([48.0, 96.0]));
+
+        let scroll = editor.editor.with_buffer(Buffer::scroll);
+        assert!(scroll.horizontal > 0.0);
+        assert!(scroll.line > 0 || scroll.vertical > 0.0);
+        assert_eq!(editor.line_numbers.scroll().line, scroll.line);
+        assert_eq!(editor.line_numbers.scroll().vertical, scroll.vertical);
+        assert_eq!(editor.cursor(), cursor);
     }
 
     #[test]

@@ -261,7 +261,7 @@ impl Renderer {
             overlay_text_renderer,
             documents: Documents::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
-            overlay_scene_rectangles: Vec::with_capacity(3),
+            overlay_scene_rectangles: Vec::with_capacity(4),
             cursor_visible: false,
         }
     }
@@ -505,8 +505,15 @@ impl Renderer {
         let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
         let editor_left = layout.code_left * scale_factor;
-        let (font_system, swash_cache, tab_labels, line_numbers, code, overlay_buffer) =
-            editor.render_parts();
+        let (
+            font_system,
+            swash_cache,
+            tab_labels,
+            line_numbers,
+            code,
+            overlay_buffer,
+            overlay_documentation_buffer,
+        ) = editor.render_parts();
         let line_number_area = TextArea {
             buffer: line_numbers,
             left: 0.0,
@@ -565,6 +572,28 @@ impl Renderer {
                     custom_glyphs: &[],
                 })
             });
+        let overlay_documentation_area = overlay_documentation_buffer
+            .zip(overlay_geometry)
+            .and_then(|(buffer, geometry)| {
+                let rectangle = translate_editor_rectangle(
+                    geometry.origin,
+                    geometry.size,
+                    layout,
+                    logical_width,
+                    logical_height,
+                    theme::OVERLAY_BACKGROUND,
+                )?;
+                Some(TextArea {
+                    buffer,
+                    left: (rectangle.origin[0] + theme::COMPLETION_WIDTH + theme::OVERLAY_PADDING)
+                        * scale_factor,
+                    top: (rectangle.origin[1] + theme::OVERLAY_PADDING) * scale_factor,
+                    scale: scale_factor,
+                    bounds: physical_bounds(rectangle, scale_factor),
+                    default_color: theme::OVERLAY_TEXT,
+                    custom_glyphs: &[],
+                })
+            });
         let tab_text_top = (theme::TAB_BAR_HEIGHT - theme::LINE_HEIGHT) * 0.5;
         let tab_areas = (0..tab_count).map(|index| {
             let tab_left = index as f32 * tab_width;
@@ -609,7 +638,7 @@ impl Renderer {
             font_system,
             &mut self.text_atlas,
             &self.text_viewport,
-            overlay_area,
+            overlay_area.into_iter().chain(overlay_documentation_area),
             swash_cache,
         )
     }
@@ -712,7 +741,7 @@ fn overlay_rectangles(
     viewport_width: f32,
     viewport_height: f32,
 ) -> Vec<Rectangle> {
-    let mut rectangles = Vec::with_capacity(3);
+    let mut rectangles = Vec::with_capacity(4);
     if let Some(border) = translate_editor_rectangle(
         overlay.origin,
         overlay.size,
@@ -743,7 +772,7 @@ fn overlay_rectangles(
             overlay.origin[0] + 1.0,
             overlay.origin[1] + theme::OVERLAY_PADDING + row as f32 * theme::LINE_HEIGHT,
         ];
-        let size = [(overlay.size[0] - 2.0).max(0.0), theme::LINE_HEIGHT];
+        let size = [(overlay.selection_width - 2.0).max(0.0), theme::LINE_HEIGHT];
         if let Some(selection) = translate_editor_rectangle(
             origin,
             size,
@@ -753,6 +782,22 @@ fn overlay_rectangles(
             theme::OVERLAY_SELECTION,
         ) {
             rectangles.push(selection);
+        }
+    }
+    if overlay.has_documentation_pane {
+        let divider_origin = [
+            overlay.origin[0] + overlay.selection_width,
+            overlay.origin[1] + 1.0,
+        ];
+        if let Some(divider) = translate_editor_rectangle(
+            divider_origin,
+            [1.0, (overlay.size[1] - 2.0).max(0.0)],
+            layout,
+            viewport_width,
+            viewport_height,
+            theme::OVERLAY_BORDER,
+        ) {
+            rectangles.push(divider);
         }
     }
     rectangles

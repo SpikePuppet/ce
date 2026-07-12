@@ -91,6 +91,7 @@ struct Application {
     lsp: LspManager,
     lsp_error_shown: bool,
     completion: Option<CompletionSession>,
+    completion_scroll_remainder: f32,
 }
 
 struct CompletionSession {
@@ -110,6 +111,7 @@ impl Application {
             lsp: LspManager::new(proxy),
             lsp_error_shown: false,
             completion: None,
+            completion_scroll_remainder: 0.0,
         }
     }
 
@@ -427,9 +429,31 @@ impl Application {
         self.refresh_completion_overlay();
     }
 
+    fn apply_scroll_input(&mut self, input: EditorInput) {
+        let EditorInput::Scroll([horizontal, vertical]) = input else {
+            return;
+        };
+        let Some(completion) = self.completion.as_mut() else {
+            self.apply_input(EditorInput::Scroll([horizontal, vertical]));
+            return;
+        };
+        let selected = scroll_completion_selection(
+            completion.selected,
+            completion.items.len(),
+            &mut self.completion_scroll_remainder,
+            vertical,
+        );
+        if selected == completion.selected {
+            return;
+        }
+        completion.selected = selected;
+        self.refresh_completion_overlay();
+    }
+
     fn dismiss_language_ui(&mut self) {
         self.lsp.cancel_interactive_requests();
         self.completion = None;
+        self.completion_scroll_remainder = 0.0;
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.dismiss_overlay();
             gpu.window().request_redraw();
@@ -626,6 +650,7 @@ impl Application {
     fn finish_document_transition(&mut self) {
         self.lsp.cancel_interactive_requests();
         self.completion = None;
+        self.completion_scroll_remainder = 0.0;
         self.cursor.reset(Instant::now());
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.dismiss_overlay();
@@ -657,6 +682,21 @@ impl Application {
             self.show_file_error("Python Diagnostics Unavailable", &error.to_string());
         }
     }
+}
+
+fn scroll_completion_selection(
+    selected: usize,
+    item_count: usize,
+    remainder: &mut f32,
+    pixels: f32,
+) -> usize {
+    if item_count == 0 {
+        return selected;
+    }
+    *remainder += pixels;
+    let steps = (*remainder / theme::LINE_HEIGHT).trunc() as isize;
+    *remainder -= steps as f32 * theme::LINE_HEIGHT;
+    selected.saturating_add_signed(steps).min(item_count - 1)
 }
 
 impl ApplicationHandler<LspEvent> for Application {
@@ -729,6 +769,17 @@ impl ApplicationHandler<LspEvent> for Application {
                     self.apply_input(input);
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scale_factor = self
+                    .gpu
+                    .as_ref()
+                    .expect("GPU state was checked above")
+                    .window()
+                    .scale_factor();
+                if let Some(input) = self.input.handle_scroll(delta, scale_factor) {
+                    self.apply_scroll_input(input);
+                }
+            }
             WindowEvent::Focused(focused) => self.set_cursor_focus(focused),
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.handle_completion_key(&event) {
@@ -793,6 +844,7 @@ impl ApplicationHandler<LspEvent> for Application {
                     items: result.items,
                     selected: 0,
                 });
+                self.completion_scroll_remainder = 0.0;
                 self.refresh_completion_overlay();
             }
             LspOutcome::CompletionDocumentation(result) => {
@@ -848,5 +900,19 @@ impl ApplicationHandler<LspEvent> for Application {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_completion_selection;
+
+    #[test]
+    fn completion_scroll_accumulates_trackpad_pixels_and_clamps() {
+        let mut remainder = 0.0;
+        assert_eq!(scroll_completion_selection(2, 5, &mut remainder, 12.0), 2);
+        assert_eq!(scroll_completion_selection(2, 5, &mut remainder, 12.0), 3);
+        assert_eq!(scroll_completion_selection(3, 5, &mut remainder, 240.0), 4);
+        assert_eq!(scroll_completion_selection(4, 5, &mut remainder, -48.0), 2);
     }
 }

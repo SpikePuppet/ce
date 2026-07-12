@@ -23,6 +23,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Use Ctrl+Space for Python completion, Cmd+I for hover information, and F12 to go to a definition.
 - In completion menus, use Up/Down to navigate, Enter or Tab to accept, and Escape to dismiss.
 - Hovering a completion item with the mouse selects it and shows its documentation when available.
+- Scroll vertically or horizontally with a trackpad or mouse wheel; while completion is open, vertical scrolling navigates its suggestions.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
 

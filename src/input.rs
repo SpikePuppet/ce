@@ -1,7 +1,7 @@
 use glyphon::Action;
 use glyphon::cosmic_text::Motion;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton};
+use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +10,7 @@ pub enum EditorInput {
     InsertText(String),
     PointerClick([f32; 2]),
     PointerDrag([f32; 2]),
+    Scroll([f32; 2]),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +135,20 @@ impl InputState {
             Ime::Commit(text) if !text.is_empty() => Some(EditorInput::InsertText(text)),
             Ime::Enabled | Ime::Preedit(_, _) | Ime::Commit(_) | Ime::Disabled => None,
         }
+    }
+
+    pub fn handle_scroll(&self, delta: MouseScrollDelta, scale_factor: f64) -> Option<EditorInput> {
+        let pixels = match delta {
+            MouseScrollDelta::LineDelta(horizontal, vertical) => [
+                -horizontal * crate::theme::LINE_HEIGHT * 3.0,
+                -vertical * crate::theme::LINE_HEIGHT * 3.0,
+            ],
+            MouseScrollDelta::PixelDelta(position) => [
+                (-position.x / scale_factor) as f32,
+                (-position.y / scale_factor) as f32,
+            ],
+        };
+        (pixels != [0.0, 0.0]).then_some(EditorInput::Scroll(pixels))
     }
 
     pub fn reset_pointer(&mut self) {
@@ -317,7 +332,7 @@ fn text_input(text: Option<&str>, modifiers: ModifiersState) -> Option<EditorInp
 mod tests {
     use glyphon::cosmic_text::Motion;
     use winit::dpi::PhysicalPosition;
-    use winit::event::{ElementState, Ime, MouseButton};
+    use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta};
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     use super::{
@@ -491,6 +506,22 @@ mod tests {
         assert_eq!(
             input.handle_cursor_moved(PhysicalPosition::new(260.0, 160.0), 2.0),
             None
+        );
+    }
+
+    #[test]
+    fn wheel_and_trackpad_deltas_become_logical_editor_scroll_pixels() {
+        let input = InputState::default();
+        assert_eq!(
+            input.handle_scroll(MouseScrollDelta::LineDelta(0.0, -1.0), 2.0),
+            Some(EditorInput::Scroll([0.0, 72.0]))
+        );
+        assert_eq!(
+            input.handle_scroll(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(20.0, -48.0)),
+                2.0,
+            ),
+            Some(EditorInput::Scroll([-10.0, 24.0]))
         );
     }
 
