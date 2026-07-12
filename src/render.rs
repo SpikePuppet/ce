@@ -16,7 +16,8 @@ use winit::dpi::PhysicalSize;
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
 use crate::editor::{
-    CursorRectangle, DiagnosticRectangle, EditorLayout, OverlayGeometry, SelectionRectangle,
+    CursorRectangle, DiagnosticRectangle, EditorLayout, OverlayGeometry, ScrollbarRectangle,
+    SelectionRectangle,
 };
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
@@ -261,7 +262,7 @@ impl Renderer {
             overlay_text_renderer,
             documents: Documents::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
-            overlay_scene_rectangles: Vec::with_capacity(4),
+            overlay_scene_rectangles: Vec::with_capacity(7),
             cursor_visible: false,
         }
     }
@@ -368,8 +369,12 @@ impl Renderer {
         self.documents.show_hover(contents);
     }
 
-    pub fn dismiss_overlay(&mut self) {
-        self.documents.dismiss_overlay();
+    pub fn dismiss_overlay(&mut self) -> bool {
+        self.documents.dismiss_overlay()
+    }
+
+    pub fn scroll_document(&mut self, delta: [f32; 2]) -> bool {
+        self.documents.scroll_active(delta)
     }
 
     pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
@@ -465,8 +470,17 @@ impl Renderer {
                         )
                     }),
             );
+        let scrollbars = editor.scrollbars();
         let overlay_geometry = editor.overlay_geometry();
         self.overlay_scene_rectangles.clear();
+        self.overlay_scene_rectangles.extend(
+            [scrollbars.vertical, scrollbars.horizontal]
+                .into_iter()
+                .flatten()
+                .filter_map(|scrollbar| {
+                    translate_scrollbar_rectangle(scrollbar, layout, logical_width, logical_height)
+                }),
+        );
         if let Some(overlay) = overlay_geometry {
             self.overlay_scene_rectangles.extend(overlay_rectangles(
                 overlay,
@@ -735,13 +749,29 @@ fn translate_diagnostic_rectangle(
     )
 }
 
+fn translate_scrollbar_rectangle(
+    scrollbar: ScrollbarRectangle,
+    layout: EditorLayout,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Option<Rectangle> {
+    translate_editor_rectangle(
+        scrollbar.origin,
+        scrollbar.size,
+        layout,
+        viewport_width,
+        viewport_height,
+        theme::SCROLLBAR_THUMB,
+    )
+}
+
 fn overlay_rectangles(
     overlay: OverlayGeometry,
     layout: EditorLayout,
     viewport_width: f32,
     viewport_height: f32,
 ) -> Vec<Rectangle> {
-    let mut rectangles = Vec::with_capacity(4);
+    let mut rectangles = Vec::with_capacity(5);
     if let Some(border) = translate_editor_rectangle(
         overlay.origin,
         overlay.size,
@@ -798,6 +828,34 @@ fn overlay_rectangles(
             theme::OVERLAY_BORDER,
         ) {
             rectangles.push(divider);
+        }
+    }
+    if let Some(scroll) = overlay.completion_scroll
+        && scroll.item_count > scroll.visible_items
+        && scroll.visible_items > 0
+    {
+        let track_height = scroll.visible_items as f32 * theme::LINE_HEIGHT;
+        let thumb_height = (track_height * scroll.visible_items as f32 / scroll.item_count as f32)
+            .clamp(
+                theme::SCROLLBAR_MINIMUM_LENGTH.min(track_height),
+                track_height,
+            );
+        let maximum_first = scroll.item_count - scroll.visible_items;
+        let offset =
+            scroll.first_item as f32 / maximum_first as f32 * (track_height - thumb_height);
+        let thumb = ScrollbarRectangle {
+            origin: [
+                overlay.origin[0] + overlay.selection_width
+                    - theme::SCROLLBAR_MARGIN
+                    - theme::SCROLLBAR_THICKNESS,
+                overlay.origin[1] + theme::OVERLAY_PADDING + offset,
+            ],
+            size: [theme::SCROLLBAR_THICKNESS, thumb_height],
+        };
+        if let Some(rectangle) =
+            translate_scrollbar_rectangle(thumb, layout, viewport_width, viewport_height)
+        {
+            rectangles.push(rectangle);
         }
     }
     rectangles

@@ -591,8 +591,12 @@ impl Documents {
         self.items[self.active].editor.show_hover(contents);
     }
 
-    pub fn dismiss_overlay(&mut self) {
-        self.items[self.active].editor.dismiss_overlay();
+    pub fn dismiss_overlay(&mut self) -> bool {
+        self.items[self.active].editor.dismiss_overlay()
+    }
+
+    pub fn scroll_active(&mut self, delta: [f32; 2]) -> bool {
+        self.items[self.active].editor.scroll_by(delta)
     }
 
     pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {

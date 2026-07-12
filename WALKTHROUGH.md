@@ -194,7 +194,10 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 - Mouse-wheel line deltas and Retina-correct trackpad pixel deltas scroll the document vertically and horizontally while preserving its cursor and selection.
 - While completion is open, the same vertical deltas navigate its full item list; fractional trackpad movement accumulates until it crosses one row and selection remains clamped at both ends.
 - Line numbers mirror manual vertical scrolling, while horizontal movement remains isolated to code.
-- Formatting, compilation, Clippy with denied warnings, seventy-four tests, and the optimized release build pass.
+- Scroll input is clamped independently against explicit horizontal and vertical content extents before state is mutated; repeated diagonal trackpad noise at the top, bottom, left, or right boundary becomes a true no-op instead of shifting an otherwise non-scrollable axis.
+- Small proportional GPU scrollbar thumbs appear for each overflowing document axis and for completion lists longer than their eight-row viewport; non-overflowing content has no unnecessary bar.
+- Scrollbars render in the final overlay pass, staying visible above code while remaining beneath completion surfaces that cover them.
+- Formatting, compilation, Clippy with denied warnings, seventy-six tests, and the optimized release build pass.
 
 ## Phase 2 product brief
 

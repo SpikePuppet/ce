@@ -24,6 +24,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - In completion menus, use Up/Down to navigate, Enter or Tab to accept, and Escape to dismiss.
 - Hovering a completion item with the mouse selects it and shows its documentation when available.
 - Scroll vertically or horizontally with a trackpad or mouse wheel; while completion is open, vertical scrolling navigates its suggestions.
+- Small proportional scrollbars appear automatically for overflowing files and completion lists.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
 

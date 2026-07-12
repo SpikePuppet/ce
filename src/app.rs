@@ -434,7 +434,13 @@ impl Application {
             return;
         };
         let Some(completion) = self.completion.as_mut() else {
-            self.apply_input(EditorInput::Scroll([horizontal, vertical]));
+            self.lsp.cancel_interactive_requests();
+            if let Some(gpu) = self.gpu.as_mut() {
+                let dismissed = gpu.dismiss_overlay();
+                if gpu.scroll_document([horizontal, vertical]) || dismissed {
+                    gpu.window().request_redraw();
+                }
+            }
             return;
         };
         let selected = scroll_completion_selection(
@@ -454,8 +460,9 @@ impl Application {
         self.lsp.cancel_interactive_requests();
         self.completion = None;
         self.completion_scroll_remainder = 0.0;
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.dismiss_overlay();
+        if let Some(gpu) = self.gpu.as_mut()
+            && gpu.dismiss_overlay()
+        {
             gpu.window().request_redraw();
         }
     }

@@ -283,8 +283,12 @@ impl GpuState {
         self.renderer.show_hover(contents);
     }
 
-    pub fn dismiss_overlay(&mut self) {
-        self.renderer.dismiss_overlay();
+    pub fn dismiss_overlay(&mut self) -> bool {
+        self.renderer.dismiss_overlay()
+    }
+
+    pub fn scroll_document(&mut self, delta: [f32; 2]) -> bool {
+        self.renderer.scroll_document(delta)
     }
 
     pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {

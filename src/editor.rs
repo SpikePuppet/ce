@@ -49,6 +49,26 @@ pub struct OverlayGeometry {
     pub selected_row: Option<usize>,
     pub selection_width: f32,
     pub has_documentation_pane: bool,
+    pub completion_scroll: Option<CompletionScroll>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletionScroll {
+    pub first_item: usize,
+    pub visible_items: usize,
+    pub item_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarRectangle {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EditorScrollbars {
+    pub vertical: Option<ScrollbarRectangle>,
+    pub horizontal: Option<ScrollbarRectangle>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +76,7 @@ enum OverlayKind {
     Completion {
         selected_row: usize,
         first_item: usize,
+        item_count: usize,
     },
     Hover,
 }
@@ -202,10 +223,13 @@ impl EditorState {
             }
             EditorInput::Scroll([horizontal, vertical]) => {
                 self.editor.with_buffer_mut(|buffer| {
-                    let mut scroll = buffer.scroll();
-                    scroll.horizontal = (scroll.horizontal + horizontal).max(0.0);
-                    scroll.vertical += vertical;
-                    buffer.set_scroll(scroll);
+                    let (viewport, content) = editor_extents(buffer, self.line_count);
+                    buffer.set_scroll(clamped_scroll(
+                        buffer.scroll(),
+                        [horizontal, vertical],
+                        viewport,
+                        content,
+                    ));
                 });
             }
         }
@@ -299,6 +323,7 @@ impl EditorState {
         self.overlay_kind = Some(OverlayKind::Completion {
             selected_row: selected.saturating_sub(start),
             first_item: start,
+            item_count: rows.len(),
         });
         self.overlay_buffer.set_size(
             Some(theme::COMPLETION_WIDTH - 2.0 * theme::OVERLAY_PADDING),
@@ -323,10 +348,12 @@ impl EditorState {
         self.update_overlay_text(text, String::new());
     }
 
-    pub fn dismiss_overlay(&mut self) {
+    pub fn dismiss_overlay(&mut self) -> bool {
+        let was_visible = self.overlay_kind.is_some();
         self.overlay_kind = None;
         self.overlay_rows = 0;
         self.overlay_menu_rows = 0;
+        was_visible
     }
 
     pub fn overlay_geometry(&self) -> Option<OverlayGeometry> {
@@ -364,6 +391,18 @@ impl EditorState {
                 OverlayKind::Hover => width,
             },
             has_documentation_pane: matches!(kind, OverlayKind::Completion { .. }),
+            completion_scroll: match kind {
+                OverlayKind::Completion {
+                    first_item,
+                    item_count,
+                    ..
+                } => Some(CompletionScroll {
+                    first_item,
+                    visible_items: self.overlay_menu_rows,
+                    item_count,
+                }),
+                OverlayKind::Hover => None,
+            },
         })
     }
 
@@ -494,12 +533,70 @@ impl EditorState {
         self.shape_and_sync_scroll();
     }
 
+    pub fn scroll_by(&mut self, [horizontal, vertical]: [f32; 2]) -> bool {
+        let (before, viewport, content) = self.editor.with_buffer(|buffer| {
+            let (viewport, content) = editor_extents(buffer, self.line_count);
+            (buffer.scroll(), viewport, content)
+        });
+        let next = clamped_scroll(before, [horizontal, vertical], viewport, content);
+        if next == before {
+            return false;
+        }
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_scroll(next);
+        });
+        self.shape_and_sync_scroll();
+        self.editor.with_buffer(Buffer::scroll) != before
+    }
+
     pub fn layout(&self) -> EditorLayout {
         EditorLayout {
             gutter_width: self.gutter_width,
             gutter_text_width: self.gutter_width - theme::GUTTER_TEXT_RIGHT_PADDING,
             code_left: self.gutter_width + theme::EDITOR_TEXT_LEFT_PADDING,
         }
+    }
+
+    pub fn scrollbars(&self) -> EditorScrollbars {
+        self.editor.with_buffer(|buffer| {
+            let (viewport, content) = editor_extents(buffer, self.line_count);
+            let [viewport_width, viewport_height] = viewport;
+            let [content_width, content_height] = content;
+            let scroll = buffer.scroll();
+            let vertical_offset =
+                scroll.line as f32 * theme::LINE_HEIGHT + scroll.vertical.max(0.0);
+
+            EditorScrollbars {
+                vertical: scrollbar_thumb(
+                    viewport_height,
+                    viewport_height,
+                    content_height,
+                    vertical_offset,
+                )
+                .map(|(offset, length)| ScrollbarRectangle {
+                    origin: [
+                        (viewport_width - theme::SCROLLBAR_MARGIN - theme::SCROLLBAR_THICKNESS)
+                            .max(0.0),
+                        offset,
+                    ],
+                    size: [theme::SCROLLBAR_THICKNESS, length],
+                }),
+                horizontal: scrollbar_thumb(
+                    viewport_width,
+                    viewport_width,
+                    content_width,
+                    scroll.horizontal,
+                )
+                .map(|(offset, length)| ScrollbarRectangle {
+                    origin: [
+                        offset,
+                        (viewport_height - theme::SCROLLBAR_MARGIN - theme::SCROLLBAR_THICKNESS)
+                            .max(0.0),
+                    ],
+                    size: [length, theme::SCROLLBAR_THICKNESS],
+                }),
+            }
+        })
     }
 
     pub fn selection_rectangles(&self) -> &[SelectionRectangle] {
@@ -833,6 +930,87 @@ fn normalized_overlay_lines(
         .collect()
 }
 
+fn approximate_line_columns(text: &str) -> usize {
+    text.chars().fold(0, |column, character| {
+        if character == '\t' {
+            let tab = usize::from(theme::TAB_WIDTH);
+            (column / tab + 1) * tab
+        } else {
+            column + usize::from(!character.is_ascii()) + 1
+        }
+    })
+}
+
+fn editor_extents(buffer: &Buffer, line_count: usize) -> ([f32; 2], [f32; 2]) {
+    let (viewport_width, viewport_height) = buffer.size();
+    let viewport = [
+        viewport_width.unwrap_or(0.0),
+        viewport_height.unwrap_or(0.0),
+    ];
+    let cell_width = buffer
+        .monospace_width()
+        .unwrap_or(theme::APPROXIMATE_CELL_WIDTH);
+    let approximate_width = buffer
+        .lines
+        .iter()
+        .map(|line| approximate_line_columns(line.text()) as f32 * cell_width)
+        .fold(0.0, f32::max);
+    let measured_width = buffer
+        .lines
+        .iter()
+        .filter_map(|line| line.layout_opt())
+        .flatten()
+        .map(|line| line.w)
+        .fold(0.0, f32::max);
+    (
+        viewport,
+        [
+            approximate_width.max(measured_width),
+            line_count as f32 * theme::LINE_HEIGHT,
+        ],
+    )
+}
+
+fn clamped_scroll(
+    current: Scroll,
+    [horizontal, vertical]: [f32; 2],
+    viewport: [f32; 2],
+    content: [f32; 2],
+) -> Scroll {
+    let vertical_offset = current.line as f32 * theme::LINE_HEIGHT + current.vertical.max(0.0);
+    let next_horizontal =
+        (current.horizontal + horizontal).clamp(0.0, (content[0] - viewport[0]).max(0.0));
+    let next_vertical =
+        (vertical_offset + vertical).clamp(0.0, (content[1] - viewport[1]).max(0.0));
+    Scroll::new(
+        (next_vertical / theme::LINE_HEIGHT).floor() as usize,
+        next_vertical % theme::LINE_HEIGHT,
+        next_horizontal,
+    )
+}
+
+fn scrollbar_thumb(
+    track_extent: f32,
+    viewport_extent: f32,
+    content_extent: f32,
+    scroll_offset: f32,
+) -> Option<(f32, f32)> {
+    if track_extent <= 0.0 || content_extent <= viewport_extent + 0.5 {
+        return None;
+    }
+    let length = (track_extent * viewport_extent / content_extent).clamp(
+        theme::SCROLLBAR_MINIMUM_LENGTH.min(track_extent),
+        track_extent,
+    );
+    let maximum_scroll = (content_extent - viewport_extent).max(0.0);
+    let offset = if maximum_scroll > 0.0 {
+        scroll_offset.clamp(0.0, maximum_scroll) / maximum_scroll * (track_extent - length)
+    } else {
+        0.0
+    };
+    Some((offset, length))
+}
+
 fn diagnostic_color(severity: DiagnosticSeverity) -> [f32; 4] {
     match severity {
         DiagnosticSeverity::Error => theme::DIAGNOSTIC_ERROR,
@@ -994,6 +1172,14 @@ mod tests {
         assert_eq!(editor.overlay_rows, editor.overlay_menu_rows);
         assert_eq!(geometry.selection_width, crate::theme::COMPLETION_WIDTH);
         assert!(geometry.has_documentation_pane);
+        assert_eq!(
+            geometry.completion_scroll,
+            Some(super::CompletionScroll {
+                first_item: 2,
+                visible_items: 8,
+                item_count: 10,
+            })
+        );
         let hovered = editor.completion_item_at_position([
             editor.layout().code_left + geometry.origin[0] + 4.0,
             crate::theme::CONTENT_TOP
@@ -1040,6 +1226,57 @@ mod tests {
         assert_eq!(editor.line_numbers.scroll().line, scroll.line);
         assert_eq!(editor.line_numbers.scroll().vertical, scroll.vertical);
         assert_eq!(editor.cursor(), cursor);
+    }
+
+    #[test]
+    fn scrolling_at_document_boundaries_is_a_stable_no_op() {
+        let mut short = EditorState::with_text("one\ntwo");
+        short.resize(640.0, 400.0);
+        let initial = short.editor.with_buffer(Buffer::scroll);
+        for _ in 0..20 {
+            assert!(!short.scroll_by([0.35, 6.0]));
+        }
+        assert_eq!(short.editor.with_buffer(Buffer::scroll), initial);
+
+        let text = (0..40)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut long = EditorState::with_text(&text);
+        long.resize(320.0, 120.0);
+        assert!(long.scroll_by([0.0, 10_000.0]));
+        let bottom = long.editor.with_buffer(Buffer::scroll);
+        for _ in 0..20 {
+            assert!(!long.scroll_by([0.35, 6.0]));
+        }
+        assert_eq!(long.editor.with_buffer(Buffer::scroll), bottom);
+        assert!(long.scroll_by([0.0, -10_000.0]));
+        let top = long.editor.with_buffer(Buffer::scroll);
+        for _ in 0..20 {
+            assert!(!long.scroll_by([-0.35, -6.0]));
+        }
+        assert_eq!(long.editor.with_buffer(Buffer::scroll), top);
+    }
+
+    #[test]
+    fn scrollbars_appear_only_for_overflowing_dimensions() {
+        let mut short = EditorState::with_text("small");
+        short.resize(640.0, 400.0);
+        assert_eq!(short.scrollbars(), super::EditorScrollbars::default());
+
+        let text = (0..30)
+            .map(|_| "x".repeat(100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut overflowing = EditorState::with_text(&text);
+        overflowing.resize(240.0, 120.0);
+        let before = overflowing.scrollbars();
+        assert!(before.vertical.is_some());
+        assert!(before.horizontal.is_some());
+        overflowing.scroll_by([48.0, 96.0]);
+        let after = overflowing.scrollbars();
+        assert!(after.vertical.unwrap().origin[1] > before.vertical.unwrap().origin[1]);
+        assert!(after.horizontal.unwrap().origin[0] > before.horizontal.unwrap().origin[0]);
     }
 
     #[test]
