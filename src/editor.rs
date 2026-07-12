@@ -51,7 +51,11 @@ pub struct OverlayGeometry {
 
 #[derive(Clone, Copy)]
 enum OverlayKind {
-    Completion { selected_row: usize },
+    Completion {
+        selected_row: usize,
+        first_item: usize,
+        has_documentation: bool,
+    },
     Hover,
 }
 
@@ -92,6 +96,7 @@ pub struct EditorState {
     overlay_buffer: Buffer,
     overlay_kind: Option<OverlayKind>,
     overlay_rows: usize,
+    overlay_menu_rows: usize,
     tab_label_text: String,
     line_numbers: Buffer,
     editor: Editor<'static>,
@@ -138,6 +143,7 @@ impl EditorState {
             overlay_buffer,
             overlay_kind: None,
             overlay_rows: 0,
+            overlay_menu_rows: 0,
             tab_label_text: "Untitled".to_owned(),
             line_numbers,
             editor,
@@ -253,21 +259,42 @@ impl EditorState {
             .shape_until_scroll(&mut self.font_system, false);
     }
 
-    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+    pub fn show_completion(
+        &mut self,
+        rows: &[String],
+        selected: usize,
+        documentation: Option<&str>,
+    ) {
         const MAX_ROWS: usize = 8;
         let start = selected.saturating_sub(MAX_ROWS - 1);
         let visible = rows.iter().skip(start).take(MAX_ROWS).collect::<Vec<_>>();
-        let text = visible
+        let mut lines = visible
             .iter()
-            .map(|row| row.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.overlay_rows = visible.len();
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>();
+        self.overlay_menu_rows = visible.len();
+        let documentation = documentation
+            .map(|contents| normalized_overlay_lines(contents, 8, 80))
+            .filter(|lines| !lines.is_empty());
+        if let Some(documentation) = &documentation {
+            lines.push("─".repeat(48));
+            lines.extend(documentation.iter().cloned());
+        }
+        let text = lines.join("\n");
+        self.overlay_rows = lines.len();
         self.overlay_kind = Some(OverlayKind::Completion {
             selected_row: selected.saturating_sub(start),
+            first_item: start,
+            has_documentation: documentation.is_some(),
         });
         self.overlay_buffer.set_size(
-            Some(theme::COMPLETION_WIDTH - 2.0 * theme::OVERLAY_PADDING),
+            Some(
+                if documentation.is_some() {
+                    theme::HOVER_WIDTH
+                } else {
+                    theme::COMPLETION_WIDTH
+                } - 2.0 * theme::OVERLAY_PADDING,
+            ),
             Some((self.overlay_rows as f32 * theme::LINE_HEIGHT).max(theme::LINE_HEIGHT)),
         );
         self.overlay_buffer
@@ -277,16 +304,9 @@ impl EditorState {
     }
 
     pub fn show_hover(&mut self, contents: &str) {
-        const MAX_LINES: usize = 10;
-        const MAX_CHARACTERS: usize = 80;
-        let text = contents
-            .lines()
-            .filter(|line| !line.trim().starts_with("```"))
-            .take(MAX_LINES)
-            .map(|line| line.chars().take(MAX_CHARACTERS).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = normalized_overlay_lines(contents, 10, 80).join("\n");
         self.overlay_rows = text.lines().count().max(1);
+        self.overlay_menu_rows = 0;
         self.overlay_kind = Some(OverlayKind::Hover);
         self.overlay_buffer.set_size(
             Some(theme::HOVER_WIDTH - 2.0 * theme::OVERLAY_PADDING),
@@ -301,6 +321,7 @@ impl EditorState {
     pub fn dismiss_overlay(&mut self) {
         self.overlay_kind = None;
         self.overlay_rows = 0;
+        self.overlay_menu_rows = 0;
     }
 
     pub fn overlay_geometry(&self) -> Option<OverlayGeometry> {
@@ -309,7 +330,15 @@ impl EditorState {
         let (window_width, window_height) = self.logical_size?;
         let layout = self.layout();
         let width = match kind {
-            OverlayKind::Completion { .. } => theme::COMPLETION_WIDTH,
+            OverlayKind::Completion {
+                has_documentation, ..
+            } => {
+                if has_documentation {
+                    theme::HOVER_WIDTH
+                } else {
+                    theme::COMPLETION_WIDTH
+                }
+            }
             OverlayKind::Hover => theme::HOVER_WIDTH,
         };
         let height = self.overlay_rows as f32 * theme::LINE_HEIGHT + 2.0 * theme::OVERLAY_PADDING;
@@ -328,10 +357,41 @@ impl EditorState {
             origin: [x, y],
             size: [width.min(editor_width), height.min(editor_height)],
             selected_row: match kind {
-                OverlayKind::Completion { selected_row } => Some(selected_row),
+                OverlayKind::Completion { selected_row, .. } => Some(selected_row),
                 OverlayKind::Hover => None,
             },
         })
+    }
+
+    pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
+        let OverlayKind::Completion { first_item, .. } = self.overlay_kind? else {
+            return None;
+        };
+        let geometry = self.overlay_geometry()?;
+        let layout = self.layout();
+        let left = layout.code_left + geometry.origin[0];
+        let top = theme::CONTENT_TOP + geometry.origin[1] + theme::OVERLAY_PADDING;
+        let right = left + geometry.size[0];
+        let bottom = top + self.overlay_menu_rows as f32 * theme::LINE_HEIGHT;
+        if position[0] < left || position[0] >= right || position[1] < top || position[1] >= bottom
+        {
+            return None;
+        }
+        let row = ((position[1] - top) / theme::LINE_HEIGHT).floor() as usize;
+        Some(first_item + row)
+    }
+
+    pub fn overlay_contains_position(&self, position: [f32; 2]) -> bool {
+        let Some(geometry) = self.overlay_geometry() else {
+            return false;
+        };
+        let layout = self.layout();
+        let left = layout.code_left + geometry.origin[0];
+        let top = theme::CONTENT_TOP + geometry.origin[1];
+        position[0] >= left
+            && position[0] < left + geometry.size[0]
+            && position[1] >= top
+            && position[1] < top + geometry.size[1]
     }
 
     pub fn apply_highlights(&mut self, spans: &[HighlightSpan]) {
@@ -728,6 +788,19 @@ fn cursor_for_byte_offset(buffer: &Buffer, offset: usize) -> Cursor {
     Cursor::new(line, buffer.lines[line].text().len())
 }
 
+fn normalized_overlay_lines(
+    contents: &str,
+    maximum_lines: usize,
+    maximum_characters: usize,
+) -> Vec<String> {
+    contents
+        .lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .take(maximum_lines)
+        .map(|line| line.chars().take(maximum_characters).collect())
+        .collect()
+}
+
 fn diagnostic_color(severity: DiagnosticSeverity) -> [f32; 4] {
     match severity {
         DiagnosticSeverity::Error => theme::DIAGNOSTIC_ERROR,
@@ -881,11 +954,25 @@ mod tests {
         let rows = (0..10)
             .map(|index| format!("item {index}"))
             .collect::<Vec<_>>();
-        editor.show_completion(&rows, 9);
+        editor.show_completion(&rows, 9, Some("Documentation for item 9."));
 
         let geometry = editor.overlay_geometry().expect("completion is visible");
         assert_eq!(geometry.selected_row, Some(7));
-        assert_eq!(editor.overlay_rows, 8);
+        assert_eq!(editor.overlay_menu_rows, 8);
+        assert!(editor.overlay_rows > editor.overlay_menu_rows);
+        let hovered = editor.completion_item_at_position([
+            editor.layout().code_left + geometry.origin[0] + 4.0,
+            crate::theme::CONTENT_TOP
+                + geometry.origin[1]
+                + crate::theme::OVERLAY_PADDING
+                + 2.0 * crate::theme::LINE_HEIGHT
+                + 1.0,
+        ]);
+        assert_eq!(hovered, Some(4));
+        assert!(editor.overlay_contains_position([
+            editor.layout().code_left + geometry.origin[0] + 4.0,
+            crate::theme::CONTENT_TOP + geometry.origin[1] + geometry.size[1] - 2.0,
+        ]));
 
         editor.dismiss_overlay();
         assert!(editor.overlay_geometry().is_none());

@@ -229,30 +229,39 @@ fn create_instance_buffer(device: &Device, capacity: usize) -> Buffer {
 
 pub struct Renderer {
     rectangles: RectangleRenderer,
+    overlay_rectangles: RectangleRenderer,
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
+    overlay_text_renderer: TextRenderer,
     documents: Documents,
     scene_rectangles: Vec<Rectangle>,
+    overlay_scene_rectangles: Vec<Rectangle>,
     cursor_visible: bool,
 }
 
 impl Renderer {
     pub fn new(device: &Device, queue: &Queue, surface_format: TextureFormat) -> Self {
         let rectangles = RectangleRenderer::new(device, surface_format);
+        let overlay_rectangles = RectangleRenderer::new(device, surface_format);
         let cache = Cache::new(device);
         let text_viewport = Viewport::new(device, &cache);
         let mut text_atlas = TextAtlas::new(device, queue, &cache, surface_format);
         let text_renderer =
             TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
+        let overlay_text_renderer =
+            TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
 
         Self {
             rectangles,
+            overlay_rectangles,
             text_viewport,
             text_atlas,
             text_renderer,
+            overlay_text_renderer,
             documents: Documents::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
+            overlay_scene_rectangles: Vec::with_capacity(3),
             cursor_visible: false,
         }
     }
@@ -345,8 +354,14 @@ impl Renderer {
         self.documents.go_to_position(position);
     }
 
-    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
-        self.documents.show_completion(rows, selected);
+    pub fn show_completion(
+        &mut self,
+        rows: &[String],
+        selected: usize,
+        documentation: Option<&str>,
+    ) {
+        self.documents
+            .show_completion(rows, selected, documentation);
     }
 
     pub fn show_hover(&mut self, contents: &str) {
@@ -355,6 +370,14 @@ impl Renderer {
 
     pub fn dismiss_overlay(&mut self) {
         self.documents.dismiss_overlay();
+    }
+
+    pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
+        self.documents.completion_item_at_position(position)
+    }
+
+    pub fn overlay_contains_position(&self, position: [f32; 2]) -> bool {
+        self.documents.overlay_contains_position(position)
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
@@ -443,8 +466,9 @@ impl Renderer {
                     }),
             );
         let overlay_geometry = editor.overlay_geometry();
+        self.overlay_scene_rectangles.clear();
         if let Some(overlay) = overlay_geometry {
-            self.scene_rectangles.extend(overlay_rectangles(
+            self.overlay_scene_rectangles.extend(overlay_rectangles(
                 overlay,
                 layout,
                 logical_width,
@@ -467,6 +491,13 @@ impl Renderer {
             physical_size,
             scale_factor,
             &self.scene_rectangles,
+        );
+        self.overlay_rectangles.prepare(
+            device,
+            queue,
+            physical_size,
+            scale_factor,
+            &self.overlay_scene_rectangles,
         );
 
         let physical_width = physical_size.width.min(i32::MAX as u32) as i32;
@@ -558,14 +589,9 @@ impl Renderer {
                 custom_glyphs: &[],
             }
         });
-        let editor_areas = [
-            Some(line_number_area),
-            Some(code_area),
-            cursor_text_area,
-            overlay_area,
-        ]
-        .into_iter()
-        .flatten();
+        let editor_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
+            .into_iter()
+            .flatten();
         let text_areas = tab_areas.chain(editor_areas);
 
         self.text_renderer.prepare(
@@ -576,6 +602,15 @@ impl Renderer {
             &self.text_viewport,
             text_areas,
             swash_cache,
+        )?;
+        self.overlay_text_renderer.prepare(
+            device,
+            queue,
+            font_system,
+            &mut self.text_atlas,
+            &self.text_viewport,
+            overlay_area,
+            swash_cache,
         )
     }
 
@@ -585,6 +620,9 @@ impl Renderer {
     ) -> Result<(), glyphon::RenderError> {
         self.rectangles.render(render_pass);
         self.text_renderer
+            .render(&self.text_atlas, &self.text_viewport, render_pass)?;
+        self.overlay_rectangles.render(render_pass);
+        self.overlay_text_renderer
             .render(&self.text_atlas, &self.text_viewport, render_pass)
     }
 

@@ -270,8 +270,13 @@ impl GpuState {
         self.renderer.go_to_position(position);
     }
 
-    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
-        self.renderer.show_completion(rows, selected);
+    pub fn show_completion(
+        &mut self,
+        rows: &[String],
+        selected: usize,
+        documentation: Option<&str>,
+    ) {
+        self.renderer.show_completion(rows, selected, documentation);
     }
 
     pub fn show_hover(&mut self, contents: &str) {
@@ -280,6 +285,14 @@ impl GpuState {
 
     pub fn dismiss_overlay(&mut self) {
         self.renderer.dismiss_overlay();
+    }
+
+    pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
+        self.renderer.completion_item_at_position(position)
+    }
+
+    pub fn overlay_contains_position(&self, position: [f32; 2]) -> bool {
+        self.renderer.overlay_contains_position(position)
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {

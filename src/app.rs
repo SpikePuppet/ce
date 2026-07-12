@@ -156,6 +156,33 @@ impl Application {
 
     fn apply_input(&mut self, input: EditorInput) {
         if let EditorInput::PointerClick(position) = &input
+            && let Some(index) = self
+                .gpu
+                .as_ref()
+                .and_then(|gpu| gpu.completion_item_at_position(*position))
+            && self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| index < completion.items.len())
+        {
+            self.input.reset_pointer();
+            self.completion
+                .as_mut()
+                .expect("completion was checked")
+                .selected = index;
+            self.accept_completion();
+            return;
+        }
+        if let EditorInput::PointerClick(position) = &input
+            && self
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.overlay_contains_position(*position))
+        {
+            self.input.reset_pointer();
+            return;
+        }
+        if let EditorInput::PointerClick(position) = &input
             && position[1] < theme::TAB_BAR_HEIGHT
         {
             let position = *position;
@@ -287,12 +314,27 @@ impl Application {
         self.dismiss_language_ui();
         let Some((path, position)) = self.gpu.as_ref().and_then(GpuState::active_lsp_position)
         else {
+            self.show_language_notice(
+                "Save or open this buffer as a .py file to enable Python language features.",
+            );
             return;
         };
-        match command {
+        let sent = match command {
             LanguageCommand::Completion => self.lsp.request_completion(&path, position),
             LanguageCommand::Hover => self.lsp.request_hover(&path, position),
             LanguageCommand::GoToDefinition => self.lsp.request_definition(&path, position),
+        };
+        if !sent {
+            self.show_language_notice(
+                "Pyright is not ready yet. Wait a moment and try the command again.",
+            );
+        }
+    }
+
+    fn show_language_notice(&mut self, message: &str) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.show_hover(message);
+            gpu.window().request_redraw();
         }
     }
 
@@ -357,10 +399,32 @@ impl Application {
                 None => item.label.clone(),
             })
             .collect::<Vec<_>>();
+        let selected = completion.selected;
+        let path = completion.path.clone();
+        let item = completion.items[selected].clone();
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.show_completion(&rows, completion.selected);
+            gpu.show_completion(&rows, selected, item.documentation.as_deref());
             gpu.window().request_redraw();
         }
+        let _ = self.lsp.request_completion_resolve(&path, selected, &item);
+    }
+
+    fn update_completion_hover(&mut self, position: [f32; 2]) {
+        let Some(index) = self
+            .gpu
+            .as_ref()
+            .and_then(|gpu| gpu.completion_item_at_position(position))
+        else {
+            return;
+        };
+        let Some(completion) = self.completion.as_mut() else {
+            return;
+        };
+        if index >= completion.items.len() || completion.selected == index {
+            return;
+        }
+        completion.selected = index;
+        self.refresh_completion_overlay();
     }
 
     fn dismiss_language_ui(&mut self) {
@@ -655,6 +719,8 @@ impl ApplicationHandler<LspEvent> for Application {
                     .scale_factor();
                 if let Some(input) = self.input.handle_cursor_moved(position, scale_factor) {
                     self.apply_input(input);
+                } else if let Some(position) = self.input.pointer_position() {
+                    self.update_completion_hover(position);
                 }
             }
             WindowEvent::CursorLeft { .. } => self.input.reset_pointer(),
@@ -727,6 +793,19 @@ impl ApplicationHandler<LspEvent> for Application {
                     items: result.items,
                     selected: 0,
                 });
+                self.refresh_completion_overlay();
+            }
+            LspOutcome::CompletionDocumentation(result) => {
+                let Some(completion) = self.completion.as_mut() else {
+                    return;
+                };
+                if completion.path != result.path
+                    || result.item_index >= completion.items.len()
+                    || completion.selected != result.item_index
+                {
+                    return;
+                }
+                completion.items[result.item_index].documentation = Some(result.documentation);
                 self.refresh_completion_overlay();
             }
             LspOutcome::Hover(result) => {

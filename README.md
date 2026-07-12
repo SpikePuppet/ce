@@ -22,6 +22,7 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Python diagnostics are supplied by `pyright-langserver` when that executable is available on `PATH`.
 - Use Ctrl+Space for Python completion, Cmd+I for hover information, and F12 to go to a definition.
 - In completion menus, use Up/Down to navigate, Enter or Tab to accept, and Escape to dismiss.
+- Hovering a completion item with the mouse selects it and shows its documentation when available.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
 

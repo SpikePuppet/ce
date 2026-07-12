@@ -140,6 +140,10 @@ impl InputState {
         self.primary_pointer_down = false;
         self.pointer_position = None;
     }
+
+    pub fn pointer_position(&self) -> Option<[f32; 2]> {
+        self.pointer_position
+    }
 }
 
 fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
@@ -153,7 +157,8 @@ fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
 
 fn language_command(key: &Key, modifiers: ModifiersState) -> Option<LanguageCommand> {
     if modifiers == ModifiersState::CONTROL
-        && matches!(key, Key::Character(character) if character == " ")
+        && (matches!(key, Key::Named(NamedKey::Space))
+            || matches!(key, Key::Character(character) if character == " "))
     {
         Some(LanguageCommand::Completion)
     } else if modifiers == ModifiersState::SUPER
@@ -403,7 +408,7 @@ mod tests {
     #[test]
     fn language_shortcuts_map_to_explicit_commands() {
         assert_eq!(
-            command_for_key(&Key::Character(" ".into()), ModifiersState::CONTROL),
+            command_for_key(&Key::Named(NamedKey::Space), ModifiersState::CONTROL),
             Some(Command::Language(LanguageCommand::Completion))
         );
         assert_eq!(

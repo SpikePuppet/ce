@@ -176,10 +176,13 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 ### Milestone 13 review record
 
 - Ctrl+Space requests completions at the active Python cursor; a GPU-rendered menu shows up to eight rows and keeps the selected item visible while Up and Down navigate.
+- The macOS shortcut path accepts `winit`'s real `NamedKey::Space` event shape, and unavailable buffers or a still-starting Pyright server display an explanatory notice instead of failing silently.
 - Enter and Tab accept the selection as one undoable edit, Escape dismisses it, and server-provided UTF-16 text-edit ranges take precedence over the local identifier-prefix fallback.
 - Cmd+I requests hover information and displays normalized plaintext or markup content in a bounded GPU tooltip near the shaped cursor cell.
 - F12 requests a definition, opens or switches to the target file through the existing tab model, converts its UTF-16 target position, and places the cursor without modifying the document.
 - The completion and hover surfaces reuse the editor's font system, glyph atlas, rectangle batch, Retina conversion, and viewport clipping instead of introducing a second UI toolkit.
+- Completion documentation is shown for the keyboard-selected or mouse-hovered item, including documentation fetched lazily through `completionItem/resolve` when the initial result omits it.
+- Overlay backgrounds and text use a final render layer after the editor glyph pass, so opaque menus fully cover the code beneath them instead of blending both text surfaces.
 - Every interactive request records its document URI and synchronized version. Edits reject version-stale responses; cursor movement, selection, tab changes, Escape, and superseding requests send `$/cancelRequest` and remove pending identities.
 - Responses also verify that their source path is still active before displaying UI or navigating, preventing a result from one tab from affecting another.
 - Formatting, compilation, Clippy with denied warnings, seventy-one tests, and the optimized release build pass. Live Pyright interaction verification remains pending because `pyright-langserver` is not installed on the development machine.

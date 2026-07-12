@@ -59,8 +59,10 @@ pub struct DiagnosticUpdate {
 pub struct CompletionItem {
     pub label: String,
     pub detail: Option<String>,
+    pub documentation: Option<String>,
     pub insert_text: String,
     pub edit_range: Option<Range>,
+    pub data: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +78,13 @@ pub struct HoverResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionDocumentationResult {
+    pub path: PathBuf,
+    pub item_index: usize,
+    pub documentation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefinitionResult {
     pub source_path: PathBuf,
     pub target_path: PathBuf,
@@ -86,6 +95,7 @@ pub struct DefinitionResult {
 pub enum LspOutcome {
     Diagnostics(DiagnosticUpdate),
     Completion(CompletionResult),
+    CompletionDocumentation(CompletionDocumentationResult),
     Hover(HoverResult),
     Definition(DefinitionResult),
     ServerStopped,
@@ -102,6 +112,7 @@ pub enum LspEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestKind {
     Completion,
+    CompletionResolve { item_index: usize },
     Hover,
     Definition,
 }
@@ -373,26 +384,71 @@ impl LspManager {
         }
     }
 
-    pub fn request_completion(&mut self, path: &Path, position: Position) {
+    pub fn request_completion(&mut self, path: &Path, position: Position) -> bool {
         self.request(
             path,
             position,
             RequestKind::Completion,
             "textDocument/completion",
+        )
+    }
+
+    pub fn request_hover(&mut self, path: &Path, position: Position) -> bool {
+        self.request(path, position, RequestKind::Hover, "textDocument/hover")
+    }
+
+    pub fn request_completion_resolve(
+        &mut self,
+        path: &Path,
+        item_index: usize,
+        item: &CompletionItem,
+    ) -> bool {
+        if !self.ready || item.documentation.is_some() || item.data.is_none() {
+            return false;
+        }
+        let Ok(uri) = Url::from_file_path(path).map(|url| url.to_string()) else {
+            return false;
+        };
+        let Some(document) = self.synced.get(&uri) else {
+            return false;
+        };
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending.insert(
+            id,
+            PendingRequest {
+                kind: RequestKind::CompletionResolve { item_index },
+                path: path.to_path_buf(),
+                uri,
+                version: document.version,
+            },
         );
+        if let Some(server) = &self.server {
+            server.send(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "completionItem/resolve",
+                "params": {
+                    "label": item.label,
+                    "detail": item.detail,
+                    "insertText": item.insert_text,
+                    "data": item.data
+                }
+            }));
+            true
+        } else {
+            self.pending.remove(&id);
+            false
+        }
     }
 
-    pub fn request_hover(&mut self, path: &Path, position: Position) {
-        self.request(path, position, RequestKind::Hover, "textDocument/hover");
-    }
-
-    pub fn request_definition(&mut self, path: &Path, position: Position) {
+    pub fn request_definition(&mut self, path: &Path, position: Position) -> bool {
         self.request(
             path,
             position,
             RequestKind::Definition,
             "textDocument/definition",
-        );
+        )
     }
 
     pub fn cancel_interactive_requests(&mut self) {
@@ -486,15 +542,21 @@ impl LspManager {
         }
     }
 
-    fn request(&mut self, path: &Path, position: Position, kind: RequestKind, method: &str) {
+    fn request(
+        &mut self,
+        path: &Path,
+        position: Position,
+        kind: RequestKind,
+        method: &str,
+    ) -> bool {
         if !self.ready {
-            return;
+            return false;
         }
         let Ok(uri) = Url::from_file_path(path).map(|url| url.to_string()) else {
-            return;
+            return false;
         };
         let Some(document) = self.synced.get(&uri) else {
-            return;
+            return false;
         };
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
@@ -517,6 +579,10 @@ impl LspManager {
                     "position": { "line": position.line, "character": position.character }
                 }
             }));
+            true
+        } else {
+            self.pending.remove(&id);
+            false
         }
     }
 
@@ -531,6 +597,16 @@ impl LspManager {
                 path: pending.path,
                 items: parse_completion_items(result),
             })),
+            RequestKind::CompletionResolve { item_index } => {
+                let documentation = result.get("documentation").and_then(parse_documentation)?;
+                Some(LspOutcome::CompletionDocumentation(
+                    CompletionDocumentationResult {
+                        path: pending.path,
+                        item_index,
+                        documentation,
+                    },
+                ))
+            }
             RequestKind::Hover => {
                 let contents = parse_hover_contents(result)?;
                 Some(LspOutcome::Hover(HoverResult {
@@ -675,11 +751,24 @@ fn parse_completion_items(result: &Value) -> Vec<CompletionItem> {
                     .get("detail")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                documentation: value.get("documentation").and_then(parse_documentation),
                 insert_text,
                 edit_range,
+                data: value.get("data").cloned(),
             })
         })
         .collect()
+}
+
+fn parse_documentation(value: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    collect_hover_parts(value, &mut parts);
+    let text = parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
 }
 
 fn parse_hover_contents(result: &Value) -> Option<String> {
@@ -847,6 +936,8 @@ mod tests {
             "items": [{
                 "label": "print",
                 "detail": "built-in function",
+                "documentation": {"kind": "plaintext", "value": "Prints values."},
+                "data": {"id": 7},
                 "insertText": "ignored",
                 "textEdit": {
                     "range": {
@@ -861,6 +952,8 @@ mod tests {
         let items = parse_completion_items(&result);
         assert_eq!(items[0].insert_text, "print");
         assert_eq!(items[0].detail.as_deref(), Some("built-in function"));
+        assert_eq!(items[0].documentation.as_deref(), Some("Prints values."));
+        assert_eq!(items[0].data, Some(json!({"id": 7})));
         assert_eq!(items[0].edit_range.unwrap().end.character, 2);
     }
 

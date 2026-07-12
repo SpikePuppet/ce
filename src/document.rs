@@ -576,10 +576,15 @@ impl Documents {
         document.editor.set_cursor_byte_offset(byte);
     }
 
-    pub fn show_completion(&mut self, rows: &[String], selected: usize) {
+    pub fn show_completion(
+        &mut self,
+        rows: &[String],
+        selected: usize,
+        documentation: Option<&str>,
+    ) {
         self.items[self.active]
             .editor
-            .show_completion(rows, selected);
+            .show_completion(rows, selected, documentation);
     }
 
     pub fn show_hover(&mut self, contents: &str) {
@@ -588,6 +593,18 @@ impl Documents {
 
     pub fn dismiss_overlay(&mut self) {
         self.items[self.active].editor.dismiss_overlay();
+    }
+
+    pub fn completion_item_at_position(&self, position: [f32; 2]) -> Option<usize> {
+        self.items[self.active]
+            .editor
+            .completion_item_at_position(position)
+    }
+
+    pub fn overlay_contains_position(&self, position: [f32; 2]) -> bool {
+        self.items[self.active]
+            .editor
+            .overlay_contains_position(position)
     }
 
     fn refresh_tab_labels(&mut self) {
@@ -792,8 +809,10 @@ mod tests {
         assert!(documents.apply_completion(&CompletionItem {
             label: "print".to_owned(),
             detail: None,
+            documentation: None,
             insert_text: "print".to_owned(),
             edit_range: None,
+            data: None,
         }));
         assert_eq!(active_text(&documents), "print");
         assert!(documents.apply_history_command(HistoryCommand::Undo));
@@ -808,6 +827,7 @@ mod tests {
         assert!(documents.apply_completion(&CompletionItem {
             label: "print".to_owned(),
             detail: None,
+            documentation: None,
             insert_text: "print".to_owned(),
             edit_range: Some(Range {
                 start: Position {
@@ -819,6 +839,7 @@ mod tests {
                     character: 6,
                 },
             }),
+            data: None,
         }));
         assert_eq!(active_text(&documents), "🦀 print");
     }
