@@ -100,6 +100,14 @@ struct CompletionSession {
     selected: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionKeyCommand {
+    Next,
+    Previous,
+    Accept,
+    Dismiss,
+}
+
 impl Application {
     fn new(proxy: EventLoopProxy<LspEvent>) -> Self {
         Self {
@@ -344,28 +352,28 @@ impl Application {
         if event.state != ElementState::Pressed || self.completion.is_none() {
             return false;
         }
-        match event.logical_key {
-            Key::Named(NamedKey::ArrowDown) => {
+        match completion_key_command(&event.logical_key) {
+            Some(CompletionKeyCommand::Next) => {
                 let completion = self.completion.as_mut().expect("completion was checked");
                 completion.selected = (completion.selected + 1).min(completion.items.len() - 1);
                 self.refresh_completion_overlay();
                 true
             }
-            Key::Named(NamedKey::ArrowUp) => {
+            Some(CompletionKeyCommand::Previous) => {
                 let completion = self.completion.as_mut().expect("completion was checked");
                 completion.selected = completion.selected.saturating_sub(1);
                 self.refresh_completion_overlay();
                 true
             }
-            Key::Named(NamedKey::Enter | NamedKey::Tab) => {
+            Some(CompletionKeyCommand::Accept) => {
                 self.accept_completion();
                 true
             }
-            Key::Named(NamedKey::Escape) => {
+            Some(CompletionKeyCommand::Dismiss) => {
                 self.dismiss_language_ui();
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
@@ -706,6 +714,16 @@ fn scroll_completion_selection(
     selected.saturating_add_signed(steps).min(item_count - 1)
 }
 
+fn completion_key_command(key: &Key) -> Option<CompletionKeyCommand> {
+    match key {
+        Key::Named(NamedKey::ArrowDown) => Some(CompletionKeyCommand::Next),
+        Key::Named(NamedKey::ArrowUp) => Some(CompletionKeyCommand::Previous),
+        Key::Named(NamedKey::Enter | NamedKey::Tab) => Some(CompletionKeyCommand::Accept),
+        Key::Named(NamedKey::Escape) => Some(CompletionKeyCommand::Dismiss),
+        _ => None,
+    }
+}
+
 impl ApplicationHandler<LspEvent> for Application {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         self.update_cursor_blink(Instant::now());
@@ -912,7 +930,17 @@ impl ApplicationHandler<LspEvent> for Application {
 
 #[cfg(test)]
 mod tests {
-    use super::scroll_completion_selection;
+    use winit::keyboard::{Key, NamedKey};
+
+    use super::{CompletionKeyCommand, completion_key_command, scroll_completion_selection};
+
+    #[test]
+    fn tab_accepts_the_selected_completion() {
+        assert_eq!(
+            completion_key_command(&Key::Named(NamedKey::Tab)),
+            Some(CompletionKeyCommand::Accept)
+        );
+    }
 
     #[test]
     fn completion_scroll_accumulates_trackpad_pixels_and_clamps() {
