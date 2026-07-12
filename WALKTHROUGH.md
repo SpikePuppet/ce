@@ -26,7 +26,7 @@ We will build one milestone at a time. At the end of every milestone, we will ru
 | 10: Tabs | Approved and committed (`152f1ad`) |
 | 11: Python syntax highlighting | Approved and committed (`b31a117`) |
 | 12: Python LSP diagnostics | Approved and committed (`53c72af`) |
-| 13: Interactive LSP features | Implemented; awaiting review |
+| 13: Interactive LSP features | Approved and committed (`5c9fb4a`) |
 
 ### Milestone 1 review record
 
