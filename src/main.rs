@@ -6,6 +6,8 @@ mod editor;
 mod gpu;
 mod input;
 mod lsp;
+mod modal;
+mod project;
 mod render;
 mod syntax;
 mod theme;

@@ -7,7 +7,7 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::error::{EventLoopError, OsError};
-use winit::event::{ElementState, KeyEvent, StartCause, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::macos::WindowExtMacOS;
@@ -21,6 +21,8 @@ use crate::input::{
     KeyInput, LanguageCommand,
 };
 use crate::lsp::{CompletionItem, LspEvent, LspManager, LspOutcome};
+use crate::modal::{ModalHost, ModalOutcome};
+use crate::project::{FileTreeScreen, ProjectScan};
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -92,6 +94,8 @@ struct Application {
     lsp_error_shown: bool,
     completion: Option<CompletionSession>,
     completion_scroll_remainder: f32,
+    file_tree: Option<ModalHost<FileTreeScreen>>,
+    project_scan: Option<ProjectScan>,
 }
 
 struct CompletionSession {
@@ -120,6 +124,8 @@ impl Application {
             lsp_error_shown: false,
             completion: None,
             completion_scroll_remainder: 0.0,
+            file_tree: None,
+            project_scan: None,
         }
     }
 
@@ -257,8 +263,9 @@ impl Application {
 
     fn finish_editor_interaction(&mut self, document_changed: bool) {
         self.cursor.reset(Instant::now());
+        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
         }
 
@@ -273,8 +280,9 @@ impl Application {
             return;
         }
 
+        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
         }
     }
@@ -289,8 +297,9 @@ impl Application {
         }
         self.cursor.set_focused(focused, Instant::now());
 
+        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
         }
     }
@@ -298,6 +307,8 @@ impl Application {
     fn handle_file_command(&mut self, command: FileCommand) {
         match command {
             FileCommand::Open => self.open_document(),
+            FileCommand::OpenFolder => self.open_project_folder(),
+            FileCommand::ToggleFileTree => self.toggle_file_tree(),
             FileCommand::Save => {
                 self.save_document(false);
             }
@@ -518,6 +529,108 @@ impl Application {
         self.finish_document_transition();
     }
 
+    fn open_project_folder(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(path) = FileDialog::new()
+            .set_parent(gpu.window())
+            .set_title("Open Project Folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        let root = std::fs::canonicalize(&path).unwrap_or(path);
+        let scan = ProjectScan::start(root.clone(), gpu.window_arc());
+        self.dismiss_language_ui();
+        self.input.reset_pointer();
+        self.file_tree = Some(ModalHost::new(FileTreeScreen::new(root)));
+        self.project_scan = Some(scan);
+        self.refresh_modal_view();
+    }
+
+    fn toggle_file_tree(&mut self) {
+        let Some(was_visible) = self.file_tree.as_ref().map(ModalHost::is_visible) else {
+            self.open_project_folder();
+            return;
+        };
+        if was_visible {
+            self.file_tree.as_mut().expect("file tree exists").hide();
+            self.cursor.reset(Instant::now());
+        } else {
+            self.dismiss_language_ui();
+            self.input.reset_pointer();
+            self.file_tree.as_mut().expect("file tree exists").show();
+        }
+        self.refresh_modal_view();
+    }
+
+    fn poll_project_scan(&mut self) {
+        let result = self
+            .project_scan
+            .as_ref()
+            .and_then(|scan| scan.try_finish().ok().flatten());
+        let Some(result) = result else {
+            return;
+        };
+        self.project_scan = None;
+        if let Some(file_tree) = self.file_tree.as_mut() {
+            file_tree.screen_mut().finish_scan(result);
+        }
+        self.refresh_modal_view();
+    }
+
+    fn modal_is_visible(&self) -> bool {
+        self.file_tree.as_ref().is_some_and(ModalHost::is_visible)
+    }
+
+    fn sync_modal_view(&mut self) {
+        let Some(viewport) = self.gpu.as_ref().map(GpuState::logical_size) else {
+            return;
+        };
+        let view = self
+            .file_tree
+            .as_ref()
+            .and_then(|file_tree| file_tree.view(viewport));
+        let modal_visible = self.modal_is_visible();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_modal_view(view);
+            gpu.set_cursor_visible(!modal_visible && self.cursor.is_visible());
+        }
+    }
+
+    fn refresh_modal_view(&mut self) {
+        self.sync_modal_view();
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.window().request_redraw();
+        }
+    }
+
+    fn handle_modal_outcome(&mut self, outcome: ModalOutcome) {
+        match outcome {
+            ModalOutcome::None => {}
+            ModalOutcome::Close => {
+                if let Some(file_tree) = self.file_tree.as_mut() {
+                    file_tree.hide();
+                }
+                self.cursor.reset(Instant::now());
+            }
+            ModalOutcome::OpenFile(path) => {
+                let result = self
+                    .gpu
+                    .as_mut()
+                    .expect("GPU state exists while opening a project file")
+                    .open_document(path);
+                if let Err(error) = result {
+                    self.show_file_error("Could Not Open File", &error.to_string());
+                } else {
+                    self.finish_document_transition();
+                }
+            }
+        }
+        self.refresh_modal_view();
+    }
+
     fn close_active_document(&mut self) {
         if !self.confirm_discard_changes() {
             return;
@@ -685,9 +798,10 @@ impl Application {
         self.completion = None;
         self.completion_scroll_remainder = 0.0;
         self.cursor.reset(Instant::now());
+        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.dismiss_overlay();
-            gpu.set_cursor_visible(self.cursor.is_visible());
+            gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
         }
         self.sync_window_document_state();
@@ -780,11 +894,13 @@ impl ApplicationHandler<LspEvent> for Application {
             WindowEvent::Resized(size) => {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(size);
+                self.sync_modal_view();
                 self.render_frame(event_loop);
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(gpu.window().inner_size());
+                self.sync_modal_view();
                 self.render_frame(event_loop);
             }
             WindowEvent::Occluded(false) => {
@@ -800,18 +916,51 @@ impl ApplicationHandler<LspEvent> for Application {
                     .expect("GPU state was checked above")
                     .window()
                     .scale_factor();
-                if let Some(input) = self.input.handle_cursor_moved(position, scale_factor) {
+                let input = self.input.handle_cursor_moved(position, scale_factor);
+                if self.modal_is_visible() {
+                    let pointer = self
+                        .input
+                        .pointer_position()
+                        .expect("cursor position was stored");
+                    let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                    self.file_tree
+                        .as_mut()
+                        .expect("visible file tree exists")
+                        .pointer_moved(pointer, viewport);
+                    self.refresh_modal_view();
+                } else if let Some(input) = input {
                     self.apply_input(input);
                 } else if let Some(position) = self.input.pointer_position() {
                     self.update_pointer_hover(position);
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                self.update_pointer_hover([-1.0, -1.0]);
+                if self.modal_is_visible() {
+                    let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                    self.file_tree
+                        .as_mut()
+                        .expect("visible file tree exists")
+                        .pointer_moved([-1.0, -1.0], viewport);
+                    self.refresh_modal_view();
+                } else {
+                    self.update_pointer_hover([-1.0, -1.0]);
+                }
                 self.input.reset_pointer();
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(input) = self.input.handle_mouse_input(state, button) {
+                if self.modal_is_visible() && button == MouseButton::Left {
+                    if state == ElementState::Pressed
+                        && let Some(position) = self.input.pointer_position()
+                    {
+                        let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                        let outcome = self
+                            .file_tree
+                            .as_mut()
+                            .expect("visible file tree exists")
+                            .pointer_pressed(position, viewport, Instant::now());
+                        self.handle_modal_outcome(outcome);
+                    }
+                } else if let Some(input) = self.input.handle_mouse_input(state, button) {
                     self.apply_input(input);
                 }
             }
@@ -823,11 +972,43 @@ impl ApplicationHandler<LspEvent> for Application {
                     .window()
                     .scale_factor();
                 if let Some(input) = self.input.handle_scroll(delta, scale_factor) {
-                    self.apply_scroll_input(input);
+                    if self.modal_is_visible() {
+                        let EditorInput::Scroll([_, vertical]) = input else {
+                            unreachable!("mouse wheel always produces scroll input")
+                        };
+                        let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                        self.file_tree
+                            .as_mut()
+                            .expect("visible file tree exists")
+                            .scroll(vertical, viewport);
+                        self.refresh_modal_view();
+                    } else {
+                        self.apply_scroll_input(input);
+                    }
                 }
             }
             WindowEvent::Focused(focused) => self.set_cursor_focus(focused),
             WindowEvent::KeyboardInput { event, .. } => {
+                let translated = self.input.handle_key_event(&event);
+                if let Some(KeyInput::Command(Command::File(
+                    command @ (FileCommand::ToggleFileTree | FileCommand::OpenFolder),
+                ))) = translated.as_ref()
+                {
+                    self.handle_file_command(*command);
+                    return;
+                }
+                if self.modal_is_visible() {
+                    if event.state == ElementState::Pressed {
+                        let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                        let outcome = self
+                            .file_tree
+                            .as_mut()
+                            .expect("visible file tree exists")
+                            .key_pressed(&event.logical_key, viewport);
+                        self.handle_modal_outcome(outcome);
+                    }
+                    return;
+                }
                 if self.handle_completion_key(&event) {
                     return;
                 }
@@ -837,7 +1018,7 @@ impl ApplicationHandler<LspEvent> for Application {
                     self.dismiss_language_ui();
                     return;
                 }
-                if let Some(input) = self.input.handle_key_event(&event) {
+                if let Some(input) = translated {
                     match input {
                         KeyInput::Editor(input) => self.apply_input(input),
                         KeyInput::Command(command) => self.handle_command(command),
@@ -849,12 +1030,20 @@ impl ApplicationHandler<LspEvent> for Application {
                     self.apply_input(input);
                 }
             }
-            WindowEvent::RedrawRequested => self.render_frame(event_loop),
+            WindowEvent::RedrawRequested => {
+                self.poll_project_scan();
+                self.sync_modal_view();
+                self.render_frame(event_loop);
+            }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.modal_is_visible() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         match self.cursor.next_deadline() {
             Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
             None => event_loop.set_control_flow(ControlFlow::Wait),

@@ -16,6 +16,7 @@ use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
+use crate::modal::ModalView;
 use crate::render::Renderer;
 use crate::theme;
 
@@ -170,6 +171,18 @@ impl GpuState {
         &self.window
     }
 
+    pub fn window_arc(&self) -> Arc<Window> {
+        self.window.clone()
+    }
+
+    pub fn logical_size(&self) -> [f32; 2] {
+        let scale = self.window.scale_factor() as f32;
+        [
+            self.surface_config.width as f32 / scale,
+            self.surface_config.height as f32 / scale,
+        ]
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let Some((width, height)) = drawable_extent(size) else {
             self.surface_is_configured = false;
@@ -310,6 +323,10 @@ impl GpuState {
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.renderer.set_cursor_visible(visible);
+    }
+
+    pub fn set_modal_view(&mut self, view: Option<ModalView>) {
+        self.renderer.set_modal_view(view);
     }
 
     pub fn render(&mut self) -> Result<RenderOutcome, GpuError> {

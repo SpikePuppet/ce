@@ -16,6 +16,8 @@ pub enum EditorInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileCommand {
     Open,
+    OpenFolder,
+    ToggleFileTree,
     Save,
     SaveAs,
     Close,
@@ -231,8 +233,14 @@ fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
         return None;
     };
 
-    if character.eq_ignore_ascii_case("o") && !modifiers.shift_key() {
-        Some(FileCommand::Open)
+    if character.eq_ignore_ascii_case("t") && !modifiers.shift_key() {
+        Some(FileCommand::ToggleFileTree)
+    } else if character.eq_ignore_ascii_case("o") {
+        Some(if modifiers.shift_key() {
+            FileCommand::OpenFolder
+        } else {
+            FileCommand::Open
+        })
     } else if character.eq_ignore_ascii_case("s") {
         Some(if modifiers.shift_key() {
             FileCommand::SaveAs
@@ -366,8 +374,19 @@ mod tests {
     #[test]
     fn macos_file_shortcuts_map_to_commands() {
         assert_eq!(
+            file_command(&Key::Character("t".into()), ModifiersState::SUPER),
+            Some(FileCommand::ToggleFileTree)
+        );
+        assert_eq!(
             file_command(&Key::Character("o".into()), ModifiersState::SUPER),
             Some(FileCommand::Open)
+        );
+        assert_eq!(
+            file_command(
+                &Key::Character("o".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(FileCommand::OpenFolder)
         );
         assert_eq!(
             file_command(&Key::Character("s".into()), ModifiersState::SUPER),

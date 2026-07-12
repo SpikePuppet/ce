@@ -8,6 +8,11 @@ The project is developed one reviewable milestone at a time. See [the build walk
 
 - Type normally to insert text, including Unicode and committed macOS IME text.
 - Use Cmd+O to open a file, Cmd+S to save, and Cmd+Shift+S to Save As.
+- Use Cmd+T to open or close the centered project-files modal. The first use asks for a project
+  folder; Cmd+Shift+O changes the current project folder.
+- In the project-files modal, click folders to expand them and double-click files to open or
+  activate their tabs without closing the modal. Arrow keys navigate, Enter activates, and Escape
+  closes it.
 - Use Cmd+A to select all and Cmd+C/X/V to copy, cut, and paste.
 - Use Cmd+Z to undo and Cmd+Shift+Z to redo.
 - Click a tab to switch documents; Control+Tab and Control+Shift+Tab cycle between them.
@@ -28,6 +33,9 @@ The project is developed one reviewable milestone at a time. See [the build walk
 - Small proportional scrollbars appear automatically for overflowing files and completion lists.
 
 The editor keeps its block cursor visible while the scratch buffer scrolls and suspends rendering when its window has no drawable size.
+
+The centered surface is a reusable host for project files and future systems such as Git. See
+[Modal architecture](docs/MODAL_ARCHITECTURE.md) for its extension contract and invariants.
 
 ## Run
 

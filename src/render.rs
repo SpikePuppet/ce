@@ -1,7 +1,11 @@
 use std::mem;
 
 use bytemuck::{Pod, Zeroable};
-use glyphon::{Cache, Resolution, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
+use glyphon::cosmic_text::{Attrs, Buffer as TextBuffer, Family, Metrics, Shaping, Wrap};
+use glyphon::{
+    Cache, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
+    Viewport,
+};
 use wgpu::util::DeviceExt;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -21,6 +25,7 @@ use crate::editor::{
 };
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
+use crate::modal::{ModalGeometry, ModalView};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -219,6 +224,203 @@ impl RectangleRenderer {
     }
 }
 
+struct ModalTextState {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    body_buffer: TextBuffer,
+    close_buffer: TextBuffer,
+    cached_body_text: String,
+    cached_body_size: Option<[f32; 2]>,
+    cached_close_size: Option<[f32; 2]>,
+    scene_rectangles: Vec<Rectangle>,
+    prepared: bool,
+}
+
+impl ModalTextState {
+    fn new() -> Self {
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let metrics = Metrics::new(theme::FONT_SIZE, theme::LINE_HEIGHT);
+
+        let mut body_buffer = TextBuffer::new(&mut font_system, metrics);
+        body_buffer.set_wrap(Wrap::None);
+        let mut close_buffer = TextBuffer::new(&mut font_system, metrics);
+        close_buffer.set_wrap(Wrap::None);
+
+        Self {
+            font_system,
+            swash_cache,
+            body_buffer,
+            close_buffer,
+            cached_body_text: String::new(),
+            cached_body_size: None,
+            cached_close_size: None,
+            scene_rectangles: Vec::with_capacity(16),
+            prepared: false,
+        }
+    }
+
+    fn prepare(&mut self, view: &ModalView, logical_viewport: [f32; 2]) -> ModalGeometry {
+        let geometry = ModalGeometry::for_viewport(logical_viewport);
+        let body_size = [geometry.content_size[0], (geometry.size[1] - 16.0).max(1.0)];
+        if self.cached_body_size != Some(body_size) {
+            self.body_buffer
+                .set_size(Some(body_size[0]), Some(body_size[1]));
+            self.cached_body_size = Some(body_size);
+        }
+
+        let body_text = modal_text(view, geometry.visible_rows);
+        if self.cached_body_text != body_text {
+            self.body_buffer.set_text(
+                &body_text,
+                &modal_text_attributes(),
+                Shaping::Advanced,
+                None,
+            );
+            self.cached_body_text = body_text;
+        }
+        self.body_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let close_size = geometry.close_size;
+        if self.cached_close_size != Some(close_size) {
+            self.close_buffer
+                .set_size(Some(close_size[0]), Some(close_size[1]));
+            self.cached_close_size = Some(close_size);
+        }
+        self.close_buffer
+            .set_text("×", &modal_text_attributes(), Shaping::Advanced, None);
+        self.close_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        self.scene_rectangles =
+            modal_rectangles(view, geometry, logical_viewport[0], logical_viewport[1]);
+        self.prepared = true;
+        geometry
+    }
+
+    fn hide(&mut self) {
+        self.prepared = false;
+        self.scene_rectangles.clear();
+    }
+
+    #[cfg(test)]
+    fn has_shaped_body_glyphs(&self) -> bool {
+        buffer_has_shaped_glyphs(&self.body_buffer)
+    }
+
+    #[cfg(test)]
+    fn has_shaped_close_glyphs(&self) -> bool {
+        buffer_has_shaped_glyphs(&self.close_buffer)
+    }
+}
+
+struct ModalRenderState {
+    rectangles: RectangleRenderer,
+    text_renderer: TextRenderer,
+    text: ModalTextState,
+}
+
+struct ModalPrepareContext<'a> {
+    device: &'a Device,
+    queue: &'a Queue,
+    physical_size: PhysicalSize<u32>,
+    scale_factor: f32,
+    viewport: &'a Viewport,
+    atlas: &'a mut TextAtlas,
+    logical_viewport: [f32; 2],
+}
+
+impl ModalRenderState {
+    fn new(device: &Device, surface_format: TextureFormat, atlas: &mut TextAtlas) -> Self {
+        let rectangles = RectangleRenderer::new(device, surface_format);
+        let text_renderer = TextRenderer::new(atlas, device, MultisampleState::default(), None);
+
+        Self {
+            rectangles,
+            text_renderer,
+            text: ModalTextState::new(),
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        context: ModalPrepareContext<'_>,
+        view: Option<&ModalView>,
+    ) -> Result<(), glyphon::PrepareError> {
+        let Some(view) = view else {
+            self.text.hide();
+            self.rectangles.prepare(
+                context.device,
+                context.queue,
+                context.physical_size,
+                context.scale_factor,
+                &[],
+            );
+            return Ok(());
+        };
+
+        let geometry = self.text.prepare(view, context.logical_viewport);
+        self.rectangles.prepare(
+            context.device,
+            context.queue,
+            context.physical_size,
+            context.scale_factor,
+            &self.text.scene_rectangles,
+        );
+
+        let modal_bounds = physical_bounds(
+            Rectangle::new(geometry.origin, geometry.size, [0.0; 4]),
+            context.scale_factor,
+        );
+        let close_bounds = physical_bounds(
+            Rectangle::new(geometry.close_origin, geometry.close_size, [0.0; 4]),
+            context.scale_factor,
+        );
+        let body_area = TextArea {
+            buffer: &self.text.body_buffer,
+            left: geometry.content_origin[0] * context.scale_factor,
+            top: (geometry.origin[1] + 8.0) * context.scale_factor,
+            scale: context.scale_factor,
+            bounds: modal_bounds,
+            default_color: theme::MODAL_TEXT,
+            custom_glyphs: &[],
+        };
+        let close_area = TextArea {
+            buffer: &self.text.close_buffer,
+            left: (geometry.close_origin[0] + 8.0) * context.scale_factor,
+            top: (geometry.close_origin[1] + 2.0) * context.scale_factor,
+            scale: context.scale_factor,
+            bounds: close_bounds,
+            default_color: theme::MODAL_TEXT,
+            custom_glyphs: &[],
+        };
+        self.text_renderer.prepare(
+            context.device,
+            context.queue,
+            &mut self.text.font_system,
+            context.atlas,
+            context.viewport,
+            [body_area, close_area],
+            &mut self.text.swash_cache,
+        )?;
+        Ok(())
+    }
+
+    fn render<'pass>(
+        &'pass self,
+        render_pass: &mut RenderPass<'pass>,
+        atlas: &'pass TextAtlas,
+        viewport: &'pass Viewport,
+    ) -> Result<(), glyphon::RenderError> {
+        if !self.text.prepared {
+            return Ok(());
+        }
+        self.rectangles.render(render_pass);
+        self.text_renderer.render(atlas, viewport, render_pass)
+    }
+}
+
 fn create_instance_buffer(device: &Device, capacity: usize) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some("rectangle instance buffer"),
@@ -231,6 +433,7 @@ fn create_instance_buffer(device: &Device, capacity: usize) -> Buffer {
 pub struct Renderer {
     rectangles: RectangleRenderer,
     overlay_rectangles: RectangleRenderer,
+    modal: ModalRenderState,
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -238,6 +441,7 @@ pub struct Renderer {
     documents: Documents,
     scene_rectangles: Vec<Rectangle>,
     overlay_scene_rectangles: Vec<Rectangle>,
+    modal_view: Option<ModalView>,
     cursor_visible: bool,
 }
 
@@ -252,10 +456,12 @@ impl Renderer {
             TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
         let overlay_text_renderer =
             TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
+        let modal = ModalRenderState::new(device, surface_format, &mut text_atlas);
 
         Self {
             rectangles,
             overlay_rectangles,
+            modal,
             text_viewport,
             text_atlas,
             text_renderer,
@@ -263,6 +469,7 @@ impl Renderer {
             documents: Documents::new(),
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
             overlay_scene_rectangles: Vec::with_capacity(7),
+            modal_view: None,
             cursor_visible: false,
         }
     }
@@ -398,6 +605,10 @@ impl Renderer {
         self.cursor_visible = visible;
     }
 
+    pub fn set_modal_view(&mut self, view: Option<ModalView>) {
+        self.modal_view = view;
+    }
+
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -406,6 +617,7 @@ impl Renderer {
         scale_factor: f32,
     ) -> Result<(), glyphon::PrepareError> {
         let (logical_width, logical_height) = logical_extent(physical_size, scale_factor);
+        let modal_view = self.modal_view.clone();
         let tab_count = self.documents.len();
         let active_tab = self.documents.active_index();
         let tab_width = tab_width(logical_width, tab_count);
@@ -686,6 +898,18 @@ impl Renderer {
             &self.text_viewport,
             overlay_area.into_iter().chain(overlay_documentation_area),
             swash_cache,
+        )?;
+        self.modal.prepare(
+            ModalPrepareContext {
+                device,
+                queue,
+                physical_size,
+                scale_factor,
+                viewport: &self.text_viewport,
+                atlas: &mut self.text_atlas,
+                logical_viewport: [logical_width, logical_height],
+            },
+            modal_view.as_ref(),
         )
     }
 
@@ -698,7 +922,9 @@ impl Renderer {
             .render(&self.text_atlas, &self.text_viewport, render_pass)?;
         self.overlay_rectangles.render(render_pass);
         self.overlay_text_renderer
-            .render(&self.text_atlas, &self.text_viewport, render_pass)
+            .render(&self.text_atlas, &self.text_viewport, render_pass)?;
+        self.modal
+            .render(render_pass, &self.text_atlas, &self.text_viewport)
     }
 
     pub fn finish_frame(&mut self) {
@@ -724,6 +950,143 @@ fn tab_at_position(position: [f32; 2], viewport_width: f32, tab_count: usize) ->
     let width = tab_width(viewport_width, tab_count);
     let index = (position[0] / width).floor() as usize;
     (index < tab_count).then_some(index)
+}
+
+fn modal_text_attributes() -> Attrs<'static> {
+    Attrs::new().family(Family::Name(theme::FONT_FAMILY))
+}
+
+fn modal_text(view: &ModalView, visible_rows: usize) -> String {
+    let mut text = String::new();
+    text.push_str(&view.title);
+    text.push('\n');
+    text.push_str(&view.subtitle);
+    text.push_str("\n\n");
+    for row in &view.rows {
+        text.push_str(&"  ".repeat(row.depth));
+        text.push_str(if row.expandable {
+            if row.expanded { "▾ " } else { "▸ " }
+        } else {
+            "  "
+        });
+        text.push_str(&row.label);
+        for badge in &row.badges {
+            text.push_str("  ");
+            text.push_str(&badge.label);
+        }
+        text.push('\n');
+    }
+    for _ in view.rows.len()..visible_rows {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(&view.status);
+    text
+}
+
+fn modal_rectangles(
+    view: &ModalView,
+    geometry: ModalGeometry,
+    logical_width: f32,
+    logical_height: f32,
+) -> Vec<Rectangle> {
+    let mut rectangles = Vec::with_capacity(12 + view.rows.len() * 3);
+    rectangles.push(Rectangle::new(
+        [0.0, 0.0],
+        [logical_width, logical_height],
+        theme::MODAL_SCRIM,
+    ));
+    rectangles.push(Rectangle::new(
+        geometry.origin,
+        geometry.size,
+        theme::MODAL_BACKGROUND,
+    ));
+    push_tab_outline(
+        &mut rectangles,
+        geometry.origin,
+        geometry.size,
+        1.0,
+        theme::MODAL_BORDER,
+    );
+    rectangles.push(Rectangle::new(
+        [
+            geometry.origin[0],
+            geometry.origin[1] + theme::MODAL_HEADER_HEIGHT - 1.0,
+        ],
+        [geometry.size[0], 1.0],
+        theme::MODAL_BORDER,
+    ));
+    rectangles.push(Rectangle::new(
+        [
+            geometry.origin[0],
+            geometry.origin[1] + geometry.size[1] - theme::MODAL_FOOTER_HEIGHT,
+        ],
+        [geometry.size[0], 1.0],
+        theme::MODAL_BORDER,
+    ));
+    rectangles.push(Rectangle::new(
+        geometry.close_origin,
+        geometry.close_size,
+        theme::MODAL_BADGE_BACKGROUND,
+    ));
+
+    for (row_index, row) in view.rows.iter().enumerate() {
+        let row_origin = [
+            geometry.content_origin[0],
+            geometry.content_origin[1] + row_index as f32 * theme::LINE_HEIGHT,
+        ];
+        if row.selected || row.hovered {
+            rectangles.push(Rectangle::new(
+                row_origin,
+                [geometry.content_size[0], theme::LINE_HEIGHT],
+                if row.selected {
+                    theme::MODAL_ROW_SELECTION
+                } else {
+                    theme::MODAL_ROW_HOVER
+                },
+            ));
+        }
+        let label_columns = row.depth * 2 + 2 + row.label.chars().count();
+        let mut badge_left = geometry.content_origin[0]
+            + (label_columns as f32 + 2.0) * theme::APPROXIMATE_CELL_WIDTH
+            - theme::MODAL_BADGE_HORIZONTAL_PADDING;
+        for badge in &row.badges {
+            let width = badge.label.chars().count() as f32 * theme::APPROXIMATE_CELL_WIDTH
+                + 2.0 * theme::MODAL_BADGE_HORIZONTAL_PADDING;
+            rectangles.push(Rectangle::new(
+                [
+                    badge_left,
+                    row_origin[1] + (theme::LINE_HEIGHT - theme::MODAL_BADGE_HEIGHT) * 0.5,
+                ],
+                [width, theme::MODAL_BADGE_HEIGHT],
+                theme::MODAL_BADGE_BACKGROUND,
+            ));
+            badge_left += width + 2.0 * theme::APPROXIMATE_CELL_WIDTH
+                - 2.0 * theme::MODAL_BADGE_HORIZONTAL_PADDING;
+        }
+    }
+
+    if view.total_rows > geometry.visible_rows && geometry.visible_rows > 0 {
+        let track_height = geometry.content_size[1];
+        let thumb_height = (track_height * geometry.visible_rows as f32 / view.total_rows as f32)
+            .max(theme::SCROLLBAR_MINIMUM_LENGTH)
+            .min(track_height);
+        let maximum_first = view.total_rows.saturating_sub(geometry.visible_rows);
+        let progress = if maximum_first == 0 {
+            0.0
+        } else {
+            view.first_row.min(maximum_first) as f32 / maximum_first as f32
+        };
+        rectangles.push(Rectangle::new(
+            [
+                geometry.origin[0] + geometry.size[0] - theme::SCROLLBAR_THICKNESS - 4.0,
+                geometry.content_origin[1] + progress * (track_height - thumb_height),
+            ],
+            [theme::SCROLLBAR_THICKNESS, thumb_height],
+            theme::SCROLLBAR_THUMB,
+        ));
+    }
+    rectangles
 }
 
 fn push_tab_outline(
@@ -980,12 +1343,18 @@ fn physical_bounds(rectangle: Rectangle, scale_factor: f32) -> TextBounds {
 }
 
 #[cfg(test)]
+fn buffer_has_shaped_glyphs(buffer: &TextBuffer) -> bool {
+    buffer.layout_runs().any(|run| !run.glyphs.is_empty())
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        Rectangle, RectangleInstance, logical_extent, tab_at_position, tab_width,
+        ModalTextState, Rectangle, RectangleInstance, logical_extent, tab_at_position, tab_width,
         translate_selection_rectangle,
     };
     use crate::editor::{EditorLayout, SelectionRectangle};
+    use crate::modal::{ModalBadge, ModalRow, ModalView};
     use winit::dpi::PhysicalSize;
 
     #[test]
@@ -1032,5 +1401,157 @@ mod tests {
         assert_eq!(tab_at_position([250.0, 12.0], 300.0, 3), Some(2));
         assert_eq!(tab_at_position([50.0, 50.0], 300.0, 3), None);
         assert_eq!(tab_at_position([450.0, 12.0], 960.0, 2), None);
+    }
+
+    #[test]
+    fn loading_modal_shapes_title_subtitle_status_and_close_glyphs() {
+        let mut text = ModalTextState::new();
+
+        text.prepare(&loading_view(), [960.0, 640.0]);
+
+        assert!(text.has_shaped_body_glyphs());
+        assert!(text.has_shaped_close_glyphs());
+        assert!(text.cached_body_text.contains("Project files"));
+        assert!(text.cached_body_text.contains("/project"));
+        assert!(text.cached_body_text.contains("Scanning project..."));
+    }
+
+    #[test]
+    fn populated_modal_shapes_rows_and_badges() {
+        let mut text = ModalTextState::new();
+
+        text.prepare(&populated_view(), [960.0, 640.0]);
+
+        assert!(text.has_shaped_body_glyphs());
+        assert!(text.cached_body_text.contains("src"));
+        assert!(text.cached_body_text.contains("main.rs"));
+        assert!(text.cached_body_text.contains("dotfile"));
+        assert!(text.cached_body_text.contains("ignored"));
+        assert!(text.scene_rectangles.len() > 8);
+    }
+
+    #[test]
+    fn replacing_modal_content_reshapes_body_buffer() {
+        let mut text = ModalTextState::new();
+        text.prepare(&loading_view(), [960.0, 640.0]);
+        let loading_text = text.cached_body_text.clone();
+        let loading_glyphs = body_glyph_count(&text);
+
+        text.prepare(&populated_view(), [960.0, 640.0]);
+
+        assert_ne!(text.cached_body_text, loading_text);
+        assert_ne!(body_glyph_count(&text), loading_glyphs);
+        assert!(text.cached_body_text.contains("main.rs"));
+    }
+
+    #[test]
+    fn changing_modal_geometry_invalidates_layout_size_and_keeps_glyphs() {
+        let mut text = ModalTextState::new();
+        let view = populated_view();
+        text.prepare(&view, [960.0, 640.0]);
+        let initial_size = text.cached_body_size;
+
+        text.prepare(&view, [480.0, 360.0]);
+
+        assert_ne!(text.cached_body_size, initial_size);
+        assert!(text.has_shaped_body_glyphs());
+        assert!(text.has_shaped_close_glyphs());
+    }
+
+    #[test]
+    fn repreparing_unchanged_modal_content_is_stable() {
+        let mut text = ModalTextState::new();
+        let view = populated_view();
+        text.prepare(&view, [960.0, 640.0]);
+        let first_text = text.cached_body_text.clone();
+        let first_size = text.cached_body_size;
+        let first_glyphs = body_glyph_count(&text);
+
+        text.prepare(&view, [960.0, 640.0]);
+
+        assert_eq!(text.cached_body_text, first_text);
+        assert_eq!(text.cached_body_size, first_size);
+        assert_eq!(body_glyph_count(&text), first_glyphs);
+        assert!(text.has_shaped_body_glyphs());
+    }
+
+    #[test]
+    fn hiding_modal_prevents_stale_state_from_being_submitted() {
+        let mut text = ModalTextState::new();
+        text.prepare(&populated_view(), [960.0, 640.0]);
+        assert!(text.prepared);
+        assert!(!text.scene_rectangles.is_empty());
+
+        text.hide();
+
+        assert!(!text.prepared);
+        assert!(text.scene_rectangles.is_empty());
+    }
+
+    #[test]
+    fn modal_text_state_owns_font_resources() {
+        let mut text = ModalTextState::new();
+
+        text.prepare(&populated_view(), [960.0, 640.0]);
+
+        assert!(text.has_shaped_body_glyphs());
+        assert!(text.has_shaped_close_glyphs());
+    }
+
+    fn loading_view() -> ModalView {
+        ModalView {
+            title: "Project files".to_string(),
+            subtitle: "/project".to_string(),
+            rows: Vec::new(),
+            first_row: 0,
+            total_rows: 0,
+            status: "Scanning project...".to_string(),
+        }
+    }
+
+    fn populated_view() -> ModalView {
+        ModalView {
+            title: "Project files".to_string(),
+            subtitle: "/project".to_string(),
+            rows: vec![
+                ModalRow {
+                    id: "src".to_string(),
+                    depth: 0,
+                    label: "src".to_string(),
+                    badges: Vec::new(),
+                    expandable: true,
+                    expanded: true,
+                    selected: false,
+                    hovered: false,
+                },
+                ModalRow {
+                    id: "src/main.rs".to_string(),
+                    depth: 1,
+                    label: "main.rs".to_string(),
+                    badges: vec![
+                        ModalBadge {
+                            label: "dotfile".to_string(),
+                        },
+                        ModalBadge {
+                            label: "ignored".to_string(),
+                        },
+                    ],
+                    expandable: false,
+                    expanded: false,
+                    selected: true,
+                    hovered: false,
+                },
+            ],
+            first_row: 0,
+            total_rows: 2,
+            status: "2 entries".to_string(),
+        }
+    }
+
+    fn body_glyph_count(text: &ModalTextState) -> usize {
+        text.body_buffer
+            .layout_runs()
+            .map(|run| run.glyphs.len())
+            .sum()
     }
 }
