@@ -656,18 +656,26 @@ impl Documents {
 
     fn refresh_tab_labels(&mut self) {
         self.tab_labels.clear();
+        let mut tab_reveal_actions = String::new();
+        let mut tab_close_actions = String::new();
         for (index, document) in self.items.iter().enumerate() {
             if index > 0 {
                 self.tab_labels.push('\n');
+                tab_reveal_actions.push('\n');
+                tab_close_actions.push('\n');
             }
             if document.history.is_dirty() {
                 self.tab_labels.push_str("● ");
             }
             self.tab_labels.push_str(&document.info().display_name);
+            tab_reveal_actions.push_str(if document.path.is_some() { "↗" } else { " " });
+            tab_close_actions.push('×');
         }
-        self.items[self.active]
-            .editor
-            .set_tab_labels(&self.tab_labels);
+        self.items[self.active].editor.set_tab_labels(
+            &self.tab_labels,
+            &tab_reveal_actions,
+            &tab_close_actions,
+        );
     }
 }
 
@@ -1180,6 +1188,10 @@ mod tests {
         documents.open_path(first_path.clone()).unwrap();
         assert_eq!(documents.len(), 1);
         assert_eq!(documents.active_index(), 0);
+        assert_eq!(
+            documents.active_info().display_name,
+            first_path.file_name().unwrap().to_string_lossy()
+        );
 
         documents.open_path(second_path.clone()).unwrap();
         assert_eq!(documents.len(), 2);

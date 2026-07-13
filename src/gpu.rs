@@ -247,6 +247,15 @@ impl GpuState {
         self.renderer.tab_at_position(position, logical_width)
     }
 
+    pub fn tab_action_at_position(
+        &self,
+        position: [f32; 2],
+    ) -> Option<(usize, crate::render::TabAction)> {
+        let logical_width = self.surface_config.width as f32 / self.window.scale_factor() as f32;
+        self.renderer
+            .tab_action_at_position(position, logical_width)
+    }
+
     pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
         self.renderer.open_document(path)
     }

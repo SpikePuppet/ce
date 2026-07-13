@@ -127,6 +127,8 @@ pub struct EditorState {
     font_system: FontSystem,
     swash_cache: SwashCache,
     tab_labels: Buffer,
+    tab_reveal_actions: Buffer,
+    tab_close_actions: Buffer,
     overlay_buffer: Buffer,
     overlay_documentation_buffer: Buffer,
     overlay_text: String,
@@ -171,6 +173,13 @@ impl EditorState {
         tab_labels.set_wrap(Wrap::None);
         tab_labels.set_text("Untitled", &attrs, Shaping::Advanced, None);
 
+        let mut tab_reveal_actions = Buffer::new(&mut font_system, metrics);
+        tab_reveal_actions.set_wrap(Wrap::None);
+        tab_reveal_actions.set_text(" ", &attrs, Shaping::Advanced, None);
+        let mut tab_close_actions = Buffer::new(&mut font_system, metrics);
+        tab_close_actions.set_wrap(Wrap::None);
+        tab_close_actions.set_text("×", &attrs, Shaping::Advanced, None);
+
         let mut overlay_buffer = Buffer::new(&mut font_system, metrics);
         overlay_buffer.set_wrap(Wrap::None);
         overlay_buffer.set_text("", &attrs, Shaping::Advanced, None);
@@ -182,6 +191,8 @@ impl EditorState {
             font_system,
             swash_cache,
             tab_labels,
+            tab_reveal_actions,
+            tab_close_actions,
             overlay_buffer,
             overlay_documentation_buffer,
             overlay_text: String::new(),
@@ -306,8 +317,9 @@ impl EditorState {
         self.shape_and_sync_scroll();
     }
 
-    pub fn set_tab_labels(&mut self, labels: &str) {
+    pub fn set_tab_labels(&mut self, labels: &str, reveal_actions: &str, close_actions: &str) {
         if self.tab_label_text == labels {
+            self.set_tab_action_text(reveal_actions, close_actions);
             return;
         }
         self.tab_label_text.clear();
@@ -315,6 +327,22 @@ impl EditorState {
         self.tab_labels
             .set_text(labels, &text_attributes(), Shaping::Advanced, None);
         self.tab_labels
+            .shape_until_scroll(&mut self.font_system, false);
+        self.set_tab_action_text(reveal_actions, close_actions);
+    }
+
+    fn set_tab_action_text(&mut self, reveal_actions: &str, close_actions: &str) {
+        self.tab_reveal_actions.set_text(
+            reveal_actions,
+            &text_attributes(),
+            Shaping::Advanced,
+            None,
+        );
+        self.tab_reveal_actions
+            .shape_until_scroll(&mut self.font_system, false);
+        self.tab_close_actions
+            .set_text(close_actions, &text_attributes(), Shaping::Advanced, None);
+        self.tab_close_actions
             .shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -805,6 +833,8 @@ impl EditorState {
         &Buffer,
         &Buffer,
         &Buffer,
+        &Buffer,
+        &Buffer,
         Option<&Buffer>,
         Option<&Buffer>,
     ) {
@@ -818,6 +848,8 @@ impl EditorState {
             &mut self.font_system,
             &mut self.swash_cache,
             &self.tab_labels,
+            &self.tab_reveal_actions,
+            &self.tab_close_actions,
             &self.line_numbers,
             code,
             self.overlay_kind.map(|_| &self.overlay_buffer),

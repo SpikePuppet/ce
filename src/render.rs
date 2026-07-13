@@ -30,6 +30,12 @@ use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabAction {
+    Reveal,
+    Close,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rectangle {
     pub origin: [f32; 2],
@@ -443,6 +449,7 @@ pub struct Renderer {
     overlay_scene_rectangles: Vec<Rectangle>,
     modal_view: Option<ModalView>,
     cursor_visible: bool,
+    hovered_tab_action: Option<(usize, TabAction)>,
 }
 
 impl Renderer {
@@ -471,6 +478,7 @@ impl Renderer {
             overlay_scene_rectangles: Vec::with_capacity(7),
             modal_view: None,
             cursor_visible: false,
+            hovered_tab_action: None,
         }
     }
 
@@ -524,6 +532,19 @@ impl Renderer {
 
     pub fn tab_at_position(&self, position: [f32; 2], viewport_width: f32) -> Option<usize> {
         tab_at_position(position, viewport_width, self.documents.len())
+    }
+
+    pub fn tab_action_at_position(
+        &self,
+        position: [f32; 2],
+        viewport_width: f32,
+    ) -> Option<(usize, TabAction)> {
+        tab_action_at_position(position, viewport_width, self.documents.len()).and_then(
+            |(index, action)| {
+                (action != TabAction::Reveal || self.documents.info_at(index)?.path.is_some())
+                    .then_some((index, action))
+            },
+        )
     }
 
     pub fn open_document(&mut self, path: std::path::PathBuf) -> Result<(), DocumentError> {
@@ -597,8 +618,17 @@ impl Renderer {
     }
 
     pub fn update_tab_path_hover(&mut self, position: [f32; 2], viewport_width: f32) -> bool {
-        self.documents
-            .update_tab_path_hover(position, viewport_width)
+        let hovered_action = self.tab_action_at_position(position, viewport_width);
+        let action_changed = self.hovered_tab_action != hovered_action;
+        self.hovered_tab_action = hovered_action;
+        let path_changed = if hovered_action.is_some() {
+            self.documents
+                .update_tab_path_hover([-1.0, -1.0], viewport_width)
+        } else {
+            self.documents
+                .update_tab_path_hover(position, viewport_width)
+        };
+        action_changed || path_changed
     }
 
     pub fn set_cursor_visible(&mut self, visible: bool) {
@@ -621,6 +651,7 @@ impl Renderer {
         let tab_count = self.documents.len();
         let active_tab = self.documents.active_index();
         let tab_width = tab_width(logical_width, tab_count);
+        let hovered_tab_action = self.hovered_tab_action;
         let dirty_tabs = (0..tab_count)
             .map(|index| self.documents.info_at(index).is_some_and(|info| info.dirty))
             .collect::<Vec<_>>();
@@ -646,6 +677,14 @@ impl Renderer {
                 } else {
                     theme::TAB_INACTIVE_BACKGROUND
                 },
+            ));
+        }
+        if let Some((index, action)) = hovered_tab_action {
+            let (origin, size) = tab_action_geometry(index, action, tab_width);
+            self.scene_rectangles.push(Rectangle::new(
+                origin,
+                size,
+                theme::TAB_ACTION_HOVER_BACKGROUND,
             ));
         }
         self.scene_rectangles.push(Rectangle::new(
@@ -765,6 +804,8 @@ impl Renderer {
             font_system,
             swash_cache,
             tab_labels,
+            tab_reveal_actions,
+            tab_close_actions,
             line_numbers,
             code,
             overlay_buffer,
@@ -862,11 +903,14 @@ impl Renderer {
                 scale: scale_factor,
                 bounds: TextBounds {
                     left: (tab_left * scale_factor).round() as i32,
-                    top: 0,
-                    right: ((tab_left + tab_width) * scale_factor)
+                    top: (tab_text_top * scale_factor).ceil() as i32,
+                    right: ((tab_action_geometry(index, TabAction::Reveal, tab_width).0[0]
+                        - theme::TAB_LABEL_ACTION_GAP)
+                        .max(tab_left)
+                        * scale_factor)
                         .round()
                         .min(physical_width as f32) as i32,
-                    bottom: (theme::TAB_BAR_HEIGHT * scale_factor).round() as i32,
+                    bottom: ((tab_text_top + theme::LINE_HEIGHT) * scale_factor).floor() as i32,
                 },
                 default_color: if index == active_tab {
                     theme::TAB_ACTIVE_TEXT
@@ -876,10 +920,41 @@ impl Renderer {
                 custom_glyphs: &[],
             }
         });
+        let tab_action_areas = (0..tab_count).flat_map(|index| {
+            [
+                (tab_reveal_actions, TabAction::Reveal),
+                (tab_close_actions, TabAction::Close),
+            ]
+            .map(move |(buffer, action)| {
+                let (origin, size) = tab_action_geometry(index, action, tab_width);
+                TextArea {
+                    buffer,
+                    left: (origin[0]
+                        + (theme::TAB_ACTION_BUTTON_WIDTH - theme::APPROXIMATE_CELL_WIDTH) * 0.5)
+                        * scale_factor,
+                    top: (tab_text_top - index as f32 * theme::LINE_HEIGHT) * scale_factor,
+                    scale: scale_factor,
+                    bounds: TextBounds {
+                        left: (origin[0] * scale_factor).round() as i32,
+                        top: (tab_text_top * scale_factor).ceil() as i32,
+                        right: ((origin[0] + size[0]) * scale_factor).round() as i32,
+                        bottom: ((tab_text_top + theme::LINE_HEIGHT) * scale_factor).floor() as i32,
+                    },
+                    default_color: if index == active_tab
+                        || hovered_tab_action == Some((index, action))
+                    {
+                        theme::TAB_ACTIVE_TEXT
+                    } else {
+                        theme::TAB_INACTIVE_TEXT
+                    },
+                    custom_glyphs: &[],
+                }
+            })
+        });
         let editor_areas = [Some(line_number_area), Some(code_area), cursor_text_area]
             .into_iter()
             .flatten();
-        let text_areas = tab_areas.chain(editor_areas);
+        let text_areas = tab_areas.chain(tab_action_areas).chain(editor_areas);
 
         self.text_renderer.prepare(
             device,
@@ -950,6 +1025,43 @@ fn tab_at_position(position: [f32; 2], viewport_width: f32, tab_count: usize) ->
     let width = tab_width(viewport_width, tab_count);
     let index = (position[0] / width).floor() as usize;
     (index < tab_count).then_some(index)
+}
+
+fn tab_action_at_position(
+    position: [f32; 2],
+    viewport_width: f32,
+    tab_count: usize,
+) -> Option<(usize, TabAction)> {
+    let index = tab_at_position(position, viewport_width, tab_count)?;
+    [TabAction::Reveal, TabAction::Close]
+        .into_iter()
+        .find(|action| {
+            let (origin, size) =
+                tab_action_geometry(index, *action, tab_width(viewport_width, tab_count));
+            position[0] >= origin[0]
+                && position[0] < origin[0] + size[0]
+                && position[1] >= origin[1]
+                && position[1] < origin[1] + size[1]
+        })
+        .map(|action| (index, action))
+}
+
+fn tab_action_geometry(index: usize, action: TabAction, tab_width: f32) -> ([f32; 2], [f32; 2]) {
+    let right = (index + 1) as f32 * tab_width - theme::TAB_ACTION_RIGHT_PADDING;
+    let left = match action {
+        TabAction::Close => right - theme::TAB_ACTION_BUTTON_WIDTH,
+        TabAction::Reveal => right - 2.0 * theme::TAB_ACTION_BUTTON_WIDTH - theme::TAB_ACTION_GAP,
+    };
+    (
+        [
+            left,
+            (theme::TAB_BAR_HEIGHT - theme::TAB_ACTION_BUTTON_WIDTH) * 0.5,
+        ],
+        [
+            theme::TAB_ACTION_BUTTON_WIDTH,
+            theme::TAB_ACTION_BUTTON_WIDTH,
+        ],
+    )
 }
 
 fn modal_text_attributes() -> Attrs<'static> {
@@ -1350,8 +1462,8 @@ fn buffer_has_shaped_glyphs(buffer: &TextBuffer) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModalTextState, Rectangle, RectangleInstance, logical_extent, tab_at_position, tab_width,
-        translate_selection_rectangle,
+        ModalTextState, Rectangle, RectangleInstance, TabAction, logical_extent,
+        tab_action_at_position, tab_at_position, tab_width, translate_selection_rectangle,
     };
     use crate::editor::{EditorLayout, SelectionRectangle};
     use crate::modal::{ModalBadge, ModalRow, ModalView};
@@ -1400,7 +1512,21 @@ mod tests {
         assert_eq!(tab_at_position([50.0, 12.0], 300.0, 3), Some(0));
         assert_eq!(tab_at_position([250.0, 12.0], 300.0, 3), Some(2));
         assert_eq!(tab_at_position([50.0, 50.0], 300.0, 3), None);
-        assert_eq!(tab_at_position([450.0, 12.0], 960.0, 2), None);
+        assert_eq!(tab_at_position([500.0, 12.0], 960.0, 2), None);
+    }
+
+    #[test]
+    fn tab_actions_have_separate_reveal_and_close_hit_targets() {
+        assert_eq!(
+            tab_action_at_position([155.0, 12.0], 400.0, 2),
+            Some((0, TabAction::Reveal))
+        );
+        assert_eq!(
+            tab_action_at_position([180.0, 12.0], 400.0, 2),
+            Some((0, TabAction::Close))
+        );
+        assert_eq!(tab_action_at_position([100.0, 12.0], 400.0, 2), None);
+        assert_eq!(tab_action_at_position([180.0, 50.0], 400.0, 2), None);
     }
 
     #[test]

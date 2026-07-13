@@ -23,6 +23,7 @@ use crate::input::{
 use crate::lsp::{CompletionItem, LspEvent, LspManager, LspOutcome};
 use crate::modal::{ModalHost, ModalOutcome};
 use crate::project::{FileTreeScreen, ProjectScan};
+use crate::render::TabAction;
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -203,6 +204,17 @@ impl Application {
         {
             let position = *position;
             self.input.reset_pointer();
+            if let Some((tab, action)) = self
+                .gpu
+                .as_ref()
+                .and_then(|gpu| gpu.tab_action_at_position(position))
+            {
+                match action {
+                    TabAction::Reveal => self.reveal_document(tab),
+                    TabAction::Close => self.close_document(tab),
+                }
+                return;
+            }
             let tab = self
                 .gpu
                 .as_ref()
@@ -639,6 +651,38 @@ impl Application {
             gpu.close_active_document();
         }
         self.finish_document_transition();
+    }
+
+    fn close_document(&mut self, index: usize) {
+        if self
+            .gpu
+            .as_mut()
+            .is_some_and(|gpu| gpu.switch_document(index))
+        {
+            self.finish_document_transition();
+        }
+        self.close_active_document();
+    }
+
+    fn reveal_document(&mut self, index: usize) {
+        let Some(path) = self
+            .gpu
+            .as_ref()
+            .and_then(|gpu| gpu.document_info_at(index))
+            .and_then(|info| info.path)
+        else {
+            return;
+        };
+        if let Err(error) = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+        {
+            self.show_file_error(
+                "Could Not Show File in Finder",
+                &format!("could not reveal {}: {error}", path.display()),
+            );
+        }
     }
 
     fn cycle_document(&mut self, direction: isize) {
