@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use url::Url;
 use winit::event_loop::EventLoopProxy;
 
+use crate::app_event::AppEvent;
+
 const INITIALIZE_REQUEST_ID: u64 = 1;
 const SHUTDOWN_REQUEST_ID: u64 = 2;
 const FIRST_INTERACTIVE_REQUEST_ID: u64 = 10;
@@ -159,7 +161,7 @@ struct LspServer {
 }
 
 impl LspServer {
-    fn start(root: &Path, proxy: EventLoopProxy<LspEvent>) -> Result<Self, LspStartError> {
+    fn start(root: &Path, proxy: EventLoopProxy<AppEvent>) -> Result<Self, LspStartError> {
         let mut child = Command::new("pyright-langserver")
             .arg("--stdio")
             .stdin(Stdio::piped())
@@ -213,14 +215,14 @@ impl LspServer {
                             }
                         }
                         Ok(None) => {
-                            let _ = proxy.send_event(LspEvent::ServerStopped(
+                            let _ = proxy.send_event(AppEvent::Language(LspEvent::ServerStopped(
                                 "Pyright closed its output stream".to_owned(),
-                            ));
+                            )));
                             break;
                         }
                         Err(error) => {
-                            let _ = proxy.send_event(LspEvent::ServerStopped(format!(
-                                "could not read Pyright output: {error}"
+                            let _ = proxy.send_event(AppEvent::Language(LspEvent::ServerStopped(
+                                format!("could not read Pyright output: {error}"),
                             )));
                             break;
                         }
@@ -296,7 +298,7 @@ impl Drop for LspServer {
 }
 
 pub struct LspManager {
-    proxy: EventLoopProxy<LspEvent>,
+    proxy: EventLoopProxy<AppEvent>,
     server: Option<LspServer>,
     desired: HashMap<String, LspDocument>,
     synced: HashMap<String, SyncedDocument>,
@@ -307,7 +309,7 @@ pub struct LspManager {
 }
 
 impl LspManager {
-    pub fn new(proxy: EventLoopProxy<LspEvent>) -> Self {
+    pub fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
         Self {
             proxy,
             server: None,
@@ -642,12 +644,12 @@ fn project_root(path: &Path) -> PathBuf {
 fn handle_server_message(
     message: Value,
     outbound: &Sender<Value>,
-    proxy: &EventLoopProxy<LspEvent>,
+    proxy: &EventLoopProxy<AppEvent>,
 ) {
     if message.get("id").and_then(Value::as_u64) == Some(INITIALIZE_REQUEST_ID)
         && message.get("result").is_some()
     {
-        let _ = proxy.send_event(LspEvent::Initialized);
+        let _ = proxy.send_event(AppEvent::Language(LspEvent::Initialized));
         return;
     }
 
@@ -655,7 +657,7 @@ fn handle_server_message(
         && message.get("method").is_none()
     {
         let result = message.get("result").cloned().unwrap_or(Value::Null);
-        let _ = proxy.send_event(LspEvent::Response { id, result });
+        let _ = proxy.send_event(AppEvent::Language(LspEvent::Response { id, result }));
         return;
     }
 
@@ -679,7 +681,7 @@ fn handle_server_message(
     if message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
         && let Some(update) = parse_diagnostics(&message)
     {
-        let _ = proxy.send_event(LspEvent::Diagnostics(update));
+        let _ = proxy.send_event(AppEvent::Language(LspEvent::Diagnostics(update)));
     }
 }
 

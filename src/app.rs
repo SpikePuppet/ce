@@ -1,6 +1,9 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Instant;
 
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -13,17 +16,26 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::macos::WindowExtMacOS;
 use winit::window::{Window, WindowId};
 
-use crate::clipboard::SystemClipboard;
+use crate::agent::{
+    AgentCommand as RuntimeAgentCommand, AgentPanelAction, AgentPanelHit, AgentPanelState,
+    AgentRuntime, AgentState,
+};
+use crate::app_event::AppEvent;
+use crate::clipboard::{ClipboardProvider, SystemClipboard};
 use crate::cursor::CursorBlink;
+use crate::git::{self, FileDiff, GitFileStatus, GitRepository};
+use crate::git_screen::GitScreen;
 use crate::gpu::{GpuError, GpuState, RenderOutcome};
 use crate::input::{
     ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand, InputState,
-    KeyInput, LanguageCommand,
+    KeyInput, LanguageCommand, ViewCommand,
 };
 use crate::lsp::{CompletionItem, LspEvent, LspManager, LspOutcome};
-use crate::modal::{ModalHost, ModalOutcome};
+use crate::modal::{
+    GitModalEffect, ModalAction, ModalEffect, ModalHost, ModalOutcome, ModalScreen, ModalView,
+};
 use crate::project::{FileTreeScreen, ProjectScan};
-use crate::render::TabAction;
+use crate::render::{SplashAction, TabAction};
 use crate::theme;
 
 const SAVE_BUTTON: &str = "Save";
@@ -76,7 +88,7 @@ impl From<GpuError> for AppError {
 }
 
 pub fn run() -> Result<(), AppError> {
-    let event_loop = EventLoop::<LspEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut application = Application::new(event_loop.create_proxy());
@@ -95,14 +107,96 @@ struct Application {
     lsp_error_shown: bool,
     completion: Option<CompletionSession>,
     completion_scroll_remainder: f32,
-    file_tree: Option<ModalHost<FileTreeScreen>>,
+    modal: Option<ModalHost<AppModalScreen>>,
+    project_root: Option<PathBuf>,
     project_scan: Option<ProjectScan>,
+    git_task: Option<GitTask>,
+    agent_state: AgentState,
+    agent_panel: AgentPanelState,
+    agent_runtime: AgentRuntime,
+    splash_visible: bool,
 }
 
 struct CompletionSession {
     path: std::path::PathBuf,
     items: Vec<CompletionItem>,
     selected: usize,
+}
+
+enum AppModalScreen {
+    FileTree(FileTreeScreen),
+    Git(GitScreen),
+}
+
+impl AppModalScreen {
+    fn file_tree_mut(&mut self) -> Option<&mut FileTreeScreen> {
+        match self {
+            Self::FileTree(screen) => Some(screen),
+            Self::Git(_) => None,
+        }
+    }
+
+    fn git_mut(&mut self) -> Option<&mut GitScreen> {
+        match self {
+            Self::FileTree(_) => None,
+            Self::Git(screen) => Some(screen),
+        }
+    }
+
+    fn git(&self) -> Option<&GitScreen> {
+        match self {
+            Self::FileTree(_) => None,
+            Self::Git(screen) => Some(screen),
+        }
+    }
+}
+
+impl ModalScreen for AppModalScreen {
+    fn layout(&self) -> crate::modal::ModalLayout {
+        match self {
+            Self::FileTree(screen) => screen.layout(),
+            Self::Git(screen) => screen.layout(),
+        }
+    }
+
+    fn view(&self, visible_rows: usize) -> ModalView {
+        match self {
+            Self::FileTree(screen) => screen.view(visible_rows),
+            Self::Git(screen) => screen.view(visible_rows),
+        }
+    }
+
+    fn handle_action(&mut self, action: ModalAction, visible_rows: usize) -> ModalOutcome {
+        match self {
+            Self::FileTree(screen) => screen.handle_action(action, visible_rows),
+            Self::Git(screen) => screen.handle_action(action, visible_rows),
+        }
+    }
+}
+
+struct GitTask {
+    receiver: Receiver<GitTaskResult>,
+}
+
+type GitDiffPair = (FileDiff, FileDiff);
+type GitMutationResult = Result<
+    (
+        GitRepository,
+        Vec<GitFileStatus>,
+        Option<GitDiffPair>,
+        String,
+    ),
+    String,
+>;
+
+enum GitTaskResult {
+    Status(Result<(GitRepository, Vec<GitFileStatus>), String>),
+    Diff {
+        path: PathBuf,
+        result: Result<GitDiffPair, String>,
+    },
+    Mutation(GitMutationResult),
+    Commit(Result<(GitRepository, Vec<GitFileStatus>, String), String>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,7 +208,10 @@ enum CompletionKeyCommand {
 }
 
 impl Application {
-    fn new(proxy: EventLoopProxy<LspEvent>) -> Self {
+    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+        let agent_runtime = AgentRuntime::start_fake(proxy.clone());
+        let agent_config_root = AgentPanelState::default_config_root()
+            .unwrap_or_else(|_| PathBuf::from(".config").join("editor"));
         Self {
             gpu: None,
             clipboard: SystemClipboard::default(),
@@ -125,8 +222,14 @@ impl Application {
             lsp_error_shown: false,
             completion: None,
             completion_scroll_remainder: 0.0,
-            file_tree: None,
+            modal: None,
+            project_root: None,
             project_scan: None,
+            git_task: None,
+            agent_state: AgentState::default(),
+            agent_panel: AgentPanelState::new(agent_config_root),
+            agent_runtime,
+            splash_visible: true,
         }
     }
 
@@ -145,7 +248,8 @@ impl Application {
         gpu.window().set_visible(true);
         self.cursor
             .set_focused(gpu.window().has_focus(), Instant::now());
-        gpu.set_cursor_visible(self.cursor.is_visible());
+        gpu.set_splash_visible(self.splash_visible);
+        gpu.set_cursor_visible(self.cursor_is_visible());
         gpu.window().request_redraw();
         self.gpu = Some(gpu);
         self.sync_window_document_state();
@@ -172,6 +276,27 @@ impl Application {
     }
 
     fn apply_input(&mut self, input: EditorInput) {
+        if self.splash_visible {
+            match input {
+                EditorInput::PointerClick(position) => {
+                    self.input.reset_pointer();
+                    let action = self
+                        .gpu
+                        .as_ref()
+                        .and_then(|gpu| gpu.splash_action_at_position(position));
+                    match action {
+                        Some(SplashAction::OpenFile) => self.handle_file_command(FileCommand::Open),
+                        Some(SplashAction::OpenDirectory) => {
+                            self.handle_file_command(FileCommand::OpenFolder)
+                        }
+                        None => {}
+                    }
+                    return;
+                }
+                _ if editor_input_dismisses_splash(&input) => self.hide_splash(),
+                _ => return,
+            }
+        }
         if let EditorInput::PointerClick(position) = &input
             && let Some(index) = self
                 .gpu
@@ -240,6 +365,7 @@ impl Application {
     }
 
     fn apply_editor_command(&mut self, command: EditorCommand) {
+        self.hide_splash();
         self.dismiss_language_ui();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -249,6 +375,9 @@ impl Application {
     }
 
     fn apply_clipboard_command(&mut self, command: ClipboardCommand) {
+        if matches!(command, ClipboardCommand::Cut | ClipboardCommand::Paste) {
+            self.hide_splash();
+        }
         self.dismiss_language_ui();
         let result = match self.gpu.as_mut() {
             Some(gpu) => gpu.apply_clipboard_command(command, &mut self.clipboard),
@@ -263,6 +392,7 @@ impl Application {
     }
 
     fn apply_history_command(&mut self, command: HistoryCommand) {
+        self.hide_splash();
         self.dismiss_language_ui();
         let changed = self
             .gpu
@@ -275,7 +405,7 @@ impl Application {
 
     fn finish_editor_interaction(&mut self, document_changed: bool) {
         self.cursor.reset(Instant::now());
-        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
+        let cursor_visible = self.cursor_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
@@ -292,7 +422,7 @@ impl Application {
             return;
         }
 
-        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
+        let cursor_visible = self.cursor_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
@@ -309,7 +439,7 @@ impl Application {
         }
         self.cursor.set_focused(focused, Instant::now());
 
-        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
+        let cursor_visible = self.cursor_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_cursor_visible(cursor_visible);
             gpu.window().request_redraw();
@@ -321,6 +451,7 @@ impl Application {
             FileCommand::Open => self.open_document(),
             FileCommand::OpenFolder => self.open_project_folder(),
             FileCommand::ToggleFileTree => self.toggle_file_tree(),
+            FileCommand::ToggleGitPanel => self.toggle_git_panel(),
             FileCommand::Save => {
                 self.save_document(false);
             }
@@ -335,11 +466,25 @@ impl Application {
 
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::Agent(command) => self.handle_agent_command(command),
             Command::File(command) => self.handle_file_command(command),
             Command::Editor(command) => self.apply_editor_command(command),
             Command::Clipboard(command) => self.apply_clipboard_command(command),
             Command::History(command) => self.apply_history_command(command),
             Command::Language(command) => self.handle_language_command(command),
+            Command::View(command) => self.handle_view_command(command),
+        }
+    }
+
+    fn handle_view_command(&mut self, command: ViewCommand) {
+        match command {
+            ViewCommand::ToggleMarkdownPresentation => {
+                if let Some(gpu) = self.gpu.as_mut()
+                    && gpu.toggle_markdown_presentation()
+                {
+                    gpu.window().request_redraw();
+                }
+            }
         }
     }
 
@@ -461,6 +606,14 @@ impl Application {
     }
 
     fn update_pointer_hover(&mut self, position: [f32; 2]) {
+        if self.splash_visible {
+            if let Some(gpu) = self.gpu.as_mut()
+                && gpu.update_splash_hover(position)
+            {
+                gpu.window().request_redraw();
+            }
+            return;
+        }
         if self.completion.is_some() {
             self.update_completion_hover(position);
             return;
@@ -479,6 +632,9 @@ impl Application {
     }
 
     fn apply_scroll_input(&mut self, input: EditorInput) {
+        if self.splash_visible {
+            return;
+        }
         let EditorInput::Scroll([horizontal, vertical]) = input else {
             return;
         };
@@ -538,42 +694,85 @@ impl Application {
             return;
         }
 
+        self.hide_splash();
         self.finish_document_transition();
     }
 
     fn open_project_folder(&mut self) {
+        let Some(root) = self.pick_project_folder() else {
+            return;
+        };
+        self.open_file_tree_for_root(root);
+    }
+
+    fn pick_project_folder(&self) -> Option<PathBuf> {
+        let gpu = self.gpu.as_ref()?;
+        let path = FileDialog::new()
+            .set_parent(gpu.window())
+            .set_title("Open Project Folder")
+            .pick_folder()?;
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
+    }
+
+    fn open_file_tree_for_root(&mut self, root: PathBuf) {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let Some(path) = FileDialog::new()
-            .set_parent(gpu.window())
-            .set_title("Open Project Folder")
-            .pick_folder()
-        else {
-            return;
-        };
-        let root = std::fs::canonicalize(&path).unwrap_or(path);
         let scan = ProjectScan::start(root.clone(), gpu.window_arc());
         self.dismiss_language_ui();
         self.input.reset_pointer();
-        self.file_tree = Some(ModalHost::new(FileTreeScreen::new(root)));
+        self.project_root = Some(root.clone());
+        self.modal = Some(ModalHost::new(AppModalScreen::FileTree(
+            FileTreeScreen::new(root),
+        )));
         self.project_scan = Some(scan);
         self.refresh_modal_view();
     }
 
     fn toggle_file_tree(&mut self) {
-        let Some(was_visible) = self.file_tree.as_ref().map(ModalHost::is_visible) else {
+        if !matches!(
+            self.modal.as_ref().map(|host| host.screen()),
+            Some(AppModalScreen::FileTree(_))
+        ) {
+            if let Some(root) = self.project_root.clone() {
+                self.open_file_tree_for_root(root);
+            } else {
+                self.open_project_folder();
+            }
+            return;
+        }
+        let Some(was_visible) = self.modal.as_ref().map(ModalHost::is_visible) else {
             self.open_project_folder();
             return;
         };
         if was_visible {
-            self.file_tree.as_mut().expect("file tree exists").hide();
+            self.modal.as_mut().expect("modal exists").hide();
             self.cursor.reset(Instant::now());
         } else {
             self.dismiss_language_ui();
             self.input.reset_pointer();
-            self.file_tree.as_mut().expect("file tree exists").show();
+            self.modal.as_mut().expect("modal exists").show();
         }
+        self.refresh_modal_view();
+    }
+
+    fn toggle_git_panel(&mut self) {
+        let root = match self.project_root.clone() {
+            Some(root) => root,
+            None => {
+                let Some(root) = self.pick_project_folder() else {
+                    return;
+                };
+                self.project_root = Some(root.clone());
+                root
+            }
+        };
+        self.dismiss_language_ui();
+        self.input.reset_pointer();
+        let mut screen = GitScreen::new(root.clone());
+        screen.set_loading("Loading Git status…");
+        self.modal = Some(ModalHost::new(AppModalScreen::Git(screen)));
+        self.start_git_status(root);
         self.refresh_modal_view();
     }
 
@@ -586,28 +785,55 @@ impl Application {
             return;
         };
         self.project_scan = None;
-        if let Some(file_tree) = self.file_tree.as_mut() {
-            file_tree.screen_mut().finish_scan(result);
+        if let Some(file_tree) = self
+            .modal
+            .as_mut()
+            .and_then(|host| host.screen_mut().file_tree_mut())
+        {
+            file_tree.finish_scan(result);
         }
         self.refresh_modal_view();
     }
 
     fn modal_is_visible(&self) -> bool {
-        self.file_tree.as_ref().is_some_and(ModalHost::is_visible)
+        self.modal.as_ref().is_some_and(ModalHost::is_visible)
+    }
+
+    fn cursor_is_visible(&self) -> bool {
+        self.cursor.is_visible()
+            && !self.modal_is_visible()
+            && !self.agent_panel.focused
+            && !self.splash_visible
+    }
+
+    fn hide_splash(&mut self) {
+        if !self.splash_visible {
+            return;
+        }
+        self.splash_visible = false;
+        let cursor_visible = self.cursor_is_visible();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_splash_visible(false);
+            gpu.set_cursor_visible(cursor_visible);
+            gpu.window().request_redraw();
+        }
+        self.sync_window_document_state();
     }
 
     fn sync_modal_view(&mut self) {
         let Some(viewport) = self.gpu.as_ref().map(GpuState::logical_size) else {
             return;
         };
-        let view = self
-            .file_tree
-            .as_ref()
-            .and_then(|file_tree| file_tree.view(viewport));
+        let view = self.modal.as_ref().and_then(|modal| modal.view(viewport));
         let modal_visible = self.modal_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_modal_view(view);
-            gpu.set_cursor_visible(!modal_visible && self.cursor.is_visible());
+            gpu.set_cursor_visible(
+                !modal_visible
+                    && !self.agent_panel.focused
+                    && self.cursor.is_visible()
+                    && !self.splash_visible,
+            );
         }
     }
 
@@ -618,12 +844,247 @@ impl Application {
         }
     }
 
+    fn sync_agent_panel_view(&mut self) {
+        let view = self.agent_panel.view(&self.agent_state);
+        let cursor_visible = self.cursor_is_visible();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_agent_panel_view(view.visible.then_some(view));
+            gpu.set_cursor_visible(cursor_visible);
+        }
+    }
+
+    fn refresh_agent_panel_view(&mut self) {
+        self.sync_agent_panel_view();
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.window().request_redraw();
+        }
+    }
+
+    fn handle_agent_command(&mut self, command: crate::input::AgentCommand) {
+        match command {
+            crate::input::AgentCommand::TogglePanel => {
+                self.hide_splash();
+                self.dismiss_language_ui();
+                self.agent_panel.toggle_visible();
+                self.refresh_agent_panel_view();
+            }
+        }
+    }
+
+    fn handle_agent_panel_action(&mut self, action: AgentPanelAction) {
+        match action {
+            AgentPanelAction::None => {}
+            AgentPanelAction::Changed => self.refresh_agent_panel_view(),
+            AgentPanelAction::Paste => match self.clipboard.read_text() {
+                Ok(text) => {
+                    self.agent_panel.paste(text);
+                    self.refresh_agent_panel_view();
+                }
+                Err(arboard::Error::ContentNotAvailable) => {}
+                Err(error) => self.show_file_error("Clipboard Error", &error.to_string()),
+            },
+            AgentPanelAction::Submit(prompt) => {
+                self.hide_splash();
+                let thread_id = self.agent_state.active_thread;
+                let _ = self
+                    .agent_runtime
+                    .send(RuntimeAgentCommand::SubmitPrompt { thread_id, prompt });
+                self.refresh_agent_panel_view();
+            }
+        }
+    }
+
+    fn agent_panel_captures_position(&self, position: [f32; 2]) -> bool {
+        let Some(viewport) = self.gpu.as_ref().map(GpuState::logical_size) else {
+            return false;
+        };
+        matches!(
+            self.agent_panel.hit_test(viewport, position),
+            AgentPanelHit::Drawer | AgentPanelHit::Composer | AgentPanelHit::Splitter
+        )
+    }
+
+    fn start_git_status(&mut self, project_root: PathBuf) {
+        let Some(window) = self.gpu.as_ref().map(GpuState::window_arc) else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = git::discover_repository(&project_root)
+                .and_then(|repo| git::status(&repo).map(|statuses| (repo, statuses)))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(GitTaskResult::Status(result));
+            window.request_redraw();
+        });
+        self.git_task = Some(GitTask { receiver });
+    }
+
+    fn start_git_diff(&mut self, repo: GitRepository, path: PathBuf) {
+        let Some(window) = self.gpu.as_ref().map(GpuState::window_arc) else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let result_path = path.clone();
+        thread::spawn(move || {
+            let result = git::diff(&repo, &path, true)
+                .and_then(|staged| {
+                    git::diff(&repo, &path, false).map(|worktree| (staged, worktree))
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(GitTaskResult::Diff {
+                path: result_path,
+                result,
+            });
+            window.request_redraw();
+        });
+        self.git_task = Some(GitTask { receiver });
+    }
+
+    fn start_git_stage_path(
+        &mut self,
+        repo: GitRepository,
+        path: PathBuf,
+        open_path: Option<PathBuf>,
+    ) {
+        self.start_git_mutation(repo, open_path, move |repo| git::stage_path(repo, &path));
+    }
+
+    fn start_git_unstage_path(
+        &mut self,
+        repo: GitRepository,
+        path: PathBuf,
+        open_path: Option<PathBuf>,
+    ) {
+        self.start_git_mutation(repo, open_path, move |repo| git::unstage_path(repo, &path));
+    }
+
+    fn start_git_stage_hunk(
+        &mut self,
+        repo: GitRepository,
+        patch: Vec<u8>,
+        open_path: Option<PathBuf>,
+    ) {
+        self.start_git_mutation(repo, open_path, move |repo| git::stage_hunk(repo, &patch));
+    }
+
+    fn start_git_mutation<F>(
+        &mut self,
+        repo: GitRepository,
+        open_path: Option<PathBuf>,
+        operation: F,
+    ) where
+        F: FnOnce(&GitRepository) -> Result<String, git::GitError> + Send + 'static,
+    {
+        let Some(window) = self.gpu.as_ref().map(GpuState::window_arc) else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = operation(&repo)
+                .and_then(|message| {
+                    let refreshed_repo = git::discover_repository(&repo.root)?;
+                    let statuses = git::status(&refreshed_repo)?;
+                    let diffs = match open_path {
+                        Some(path) => Some((
+                            git::diff(&refreshed_repo, &path, true)?,
+                            git::diff(&refreshed_repo, &path, false)?,
+                        )),
+                        None => None,
+                    };
+                    Ok((refreshed_repo, statuses, diffs, message))
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(GitTaskResult::Mutation(result));
+            window.request_redraw();
+        });
+        self.git_task = Some(GitTask { receiver });
+    }
+
+    fn start_git_commit(&mut self, repo: GitRepository, message: String) {
+        let Some(window) = self.gpu.as_ref().map(GpuState::window_arc) else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = git::commit(&repo, &message)
+                .and_then(|output| {
+                    let refreshed_repo = git::discover_repository(&repo.root)?;
+                    let statuses = git::status(&refreshed_repo)?;
+                    Ok((refreshed_repo, statuses, output))
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(GitTaskResult::Commit(result));
+            window.request_redraw();
+        });
+        self.git_task = Some(GitTask { receiver });
+    }
+
+    fn poll_git_task(&mut self) {
+        let result = self
+            .git_task
+            .as_ref()
+            .and_then(|task| match task.receiver.try_recv() {
+                Ok(result) => Some(Ok(result)),
+                Err(TryRecvError::Empty) => None,
+                Err(error @ TryRecvError::Disconnected) => Some(Err(error)),
+            });
+        let Some(result) = result else {
+            return;
+        };
+        self.git_task = None;
+        let Some(git_screen) = self
+            .modal
+            .as_mut()
+            .and_then(|host| host.screen_mut().git_mut())
+        else {
+            return;
+        };
+        match result {
+            Ok(GitTaskResult::Status(result)) => git_screen.finish_status(result),
+            Ok(GitTaskResult::Diff { path, result }) => git_screen.finish_diff(&path, result),
+            Ok(GitTaskResult::Mutation(result)) => git_screen.finish_mutation(result),
+            Ok(GitTaskResult::Commit(result)) => git_screen.finish_commit(result),
+            Err(error) => git_screen.finish_status(Err(error.to_string())),
+        }
+        self.refresh_modal_view();
+    }
+
+    fn handle_git_effect(&mut self, effect: GitModalEffect) {
+        let Some((repo, open_path)) = self
+            .modal
+            .as_ref()
+            .and_then(|host| host.screen().git())
+            .and_then(|screen| Some((screen.repo()?.clone(), screen.open_path())))
+        else {
+            return;
+        };
+        match effect {
+            GitModalEffect::LoadDiff(path) => self.start_git_diff(repo, path),
+            GitModalEffect::StagePath(path) => self.start_git_stage_path(repo, path, open_path),
+            GitModalEffect::UnstagePath(path) => self.start_git_unstage_path(repo, path, open_path),
+            GitModalEffect::StageHunk {
+                path: _,
+                hunk_index,
+            } => {
+                let patch = self
+                    .modal
+                    .as_ref()
+                    .and_then(|host| host.screen().git())
+                    .and_then(|screen| screen.hunk_patch(hunk_index));
+                if let Some(patch) = patch {
+                    self.start_git_stage_hunk(repo, patch, open_path);
+                }
+            }
+            GitModalEffect::Commit(message) => self.start_git_commit(repo, message),
+        }
+    }
+
     fn handle_modal_outcome(&mut self, outcome: ModalOutcome) {
         match outcome {
             ModalOutcome::None => {}
             ModalOutcome::Close => {
-                if let Some(file_tree) = self.file_tree.as_mut() {
-                    file_tree.hide();
+                if let Some(modal) = self.modal.as_mut() {
+                    modal.hide();
                 }
                 self.cursor.reset(Instant::now());
             }
@@ -636,9 +1097,11 @@ impl Application {
                 if let Err(error) = result {
                     self.show_file_error("Could Not Open File", &error.to_string());
                 } else {
+                    self.hide_splash();
                     self.finish_document_transition();
                 }
             }
+            ModalOutcome::Effect(ModalEffect::Git(effect)) => self.handle_git_effect(effect),
         }
         self.refresh_modal_view();
     }
@@ -842,7 +1305,7 @@ impl Application {
         self.completion = None;
         self.completion_scroll_remainder = 0.0;
         self.cursor.reset(Instant::now());
-        let cursor_visible = self.cursor.is_visible() && !self.modal_is_visible();
+        let cursor_visible = self.cursor_is_visible();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.dismiss_overlay();
             gpu.set_cursor_visible(cursor_visible);
@@ -857,8 +1320,12 @@ impl Application {
             return;
         };
         let info = gpu.document_info();
-        gpu.window()
-            .set_title(&format!("{} — {}", info.display_name, theme::WINDOW_TITLE));
+        if self.splash_visible {
+            gpu.window().set_title(theme::WINDOW_TITLE);
+        } else {
+            gpu.window()
+                .set_title(&format!("{} — {}", info.display_name, theme::WINDOW_TITLE));
+        }
         gpu.window().set_document_edited(info.dirty);
     }
 
@@ -900,7 +1367,11 @@ fn completion_key_command(key: &Key) -> Option<CompletionKeyCommand> {
     }
 }
 
-impl ApplicationHandler<LspEvent> for Application {
+fn editor_input_dismisses_splash(input: &EditorInput) -> bool {
+    matches!(input, EditorInput::Action(_) | EditorInput::InsertText(_))
+}
+
+impl ApplicationHandler<AppEvent> for Application {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         self.update_cursor_blink(Instant::now());
     }
@@ -939,12 +1410,14 @@ impl ApplicationHandler<LspEvent> for Application {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(size);
                 self.sync_modal_view();
+                self.sync_agent_panel_view();
                 self.render_frame(event_loop);
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 let gpu = self.gpu.as_mut().expect("GPU state was checked above");
                 gpu.resize(gpu.window().inner_size());
                 self.sync_modal_view();
+                self.sync_agent_panel_view();
                 self.render_frame(event_loop);
             }
             WindowEvent::Occluded(false) => {
@@ -967,13 +1440,23 @@ impl ApplicationHandler<LspEvent> for Application {
                         .pointer_position()
                         .expect("cursor position was stored");
                     let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
-                    self.file_tree
+                    self.modal
                         .as_mut()
-                        .expect("visible file tree exists")
+                        .expect("visible modal exists")
                         .pointer_moved(pointer, viewport);
                     self.refresh_modal_view();
+                } else if let Some(position) = self.input.pointer_position()
+                    && self.agent_panel.pointer_moved(gpu.logical_size(), position)
+                {
+                    self.refresh_agent_panel_view();
                 } else if let Some(input) = input {
-                    self.apply_input(input);
+                    if let EditorInput::PointerDrag(position) = input
+                        && self.agent_panel_captures_position(position)
+                    {
+                        self.refresh_agent_panel_view();
+                    } else {
+                        self.apply_input(input);
+                    }
                 } else if let Some(position) = self.input.pointer_position() {
                     self.update_pointer_hover(position);
                 }
@@ -981,11 +1464,13 @@ impl ApplicationHandler<LspEvent> for Application {
             WindowEvent::CursorLeft { .. } => {
                 if self.modal_is_visible() {
                     let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
-                    self.file_tree
+                    self.modal
                         .as_mut()
-                        .expect("visible file tree exists")
+                        .expect("visible modal exists")
                         .pointer_moved([-1.0, -1.0], viewport);
                     self.refresh_modal_view();
+                } else if self.agent_panel.pointer_released() {
+                    self.refresh_agent_panel_view();
                 } else {
                     self.update_pointer_hover([-1.0, -1.0]);
                 }
@@ -998,14 +1483,39 @@ impl ApplicationHandler<LspEvent> for Application {
                     {
                         let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
                         let outcome = self
-                            .file_tree
+                            .modal
                             .as_mut()
-                            .expect("visible file tree exists")
+                            .expect("visible modal exists")
                             .pointer_pressed(position, viewport, Instant::now());
                         self.handle_modal_outcome(outcome);
                     }
-                } else if let Some(input) = self.input.handle_mouse_input(state, button) {
-                    self.apply_input(input);
+                } else {
+                    let input = self.input.handle_mouse_input(state, button);
+                    if button == MouseButton::Left && state == ElementState::Released {
+                        if self.agent_panel.pointer_released() {
+                            self.refresh_agent_panel_view();
+                        }
+                        return;
+                    }
+                    if button == MouseButton::Left
+                        && state == ElementState::Pressed
+                        && let Some(position) = self.input.pointer_position()
+                    {
+                        let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                        let hit = self.agent_panel.pointer_pressed(viewport, position);
+                        if matches!(
+                            hit,
+                            AgentPanelHit::Drawer
+                                | AgentPanelHit::Composer
+                                | AgentPanelHit::Splitter
+                        ) {
+                            self.refresh_agent_panel_view();
+                            return;
+                        }
+                    }
+                    if let Some(input) = input {
+                        self.apply_input(input);
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1017,15 +1527,23 @@ impl ApplicationHandler<LspEvent> for Application {
                     .scale_factor();
                 if let Some(input) = self.input.handle_scroll(delta, scale_factor) {
                     if self.modal_is_visible() {
-                        let EditorInput::Scroll([_, vertical]) = input else {
+                        let EditorInput::Scroll(delta) = input else {
                             unreachable!("mouse wheel always produces scroll input")
                         };
                         let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
-                        self.file_tree
+                        self.modal
                             .as_mut()
-                            .expect("visible file tree exists")
-                            .scroll(vertical, viewport);
+                            .expect("visible modal exists")
+                            .scroll(delta, viewport);
                         self.refresh_modal_view();
+                    } else if let EditorInput::Scroll(delta) = input
+                        && self
+                            .input
+                            .pointer_position()
+                            .is_some_and(|position| self.agent_panel_captures_position(position))
+                    {
+                        self.agent_panel.scroll(delta);
+                        self.refresh_agent_panel_view();
                     } else {
                         self.apply_scroll_input(input);
                     }
@@ -1035,7 +1553,9 @@ impl ApplicationHandler<LspEvent> for Application {
             WindowEvent::KeyboardInput { event, .. } => {
                 let translated = self.input.handle_key_event(&event);
                 if let Some(KeyInput::Command(Command::File(
-                    command @ (FileCommand::ToggleFileTree | FileCommand::OpenFolder),
+                    command @ (FileCommand::ToggleFileTree
+                    | FileCommand::ToggleGitPanel
+                    | FileCommand::OpenFolder),
                 ))) = translated.as_ref()
                 {
                     self.handle_file_command(*command);
@@ -1044,13 +1564,45 @@ impl ApplicationHandler<LspEvent> for Application {
                 if self.modal_is_visible() {
                     if event.state == ElementState::Pressed {
                         let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
-                        let outcome = self
-                            .file_tree
-                            .as_mut()
-                            .expect("visible file tree exists")
-                            .key_pressed(&event.logical_key, viewport);
+                        let outcome = match translated.as_ref() {
+                            Some(KeyInput::Command(Command::Clipboard(
+                                ClipboardCommand::Paste,
+                            ))) => match self.clipboard.read_text() {
+                                Ok(text) => self
+                                    .modal
+                                    .as_mut()
+                                    .expect("visible modal exists")
+                                    .paste(text, viewport),
+                                Err(arboard::Error::ContentNotAvailable) => ModalOutcome::None,
+                                Err(error) => {
+                                    self.show_file_error("Clipboard Error", &error.to_string());
+                                    ModalOutcome::None
+                                }
+                            },
+                            Some(KeyInput::Command(_)) => ModalOutcome::None,
+                            _ => self
+                                .modal
+                                .as_mut()
+                                .expect("visible modal exists")
+                                .key_pressed(&event, viewport),
+                        };
                         self.handle_modal_outcome(outcome);
                     }
+                    return;
+                }
+                if let Some(KeyInput::Command(Command::Agent(command))) = translated.as_ref() {
+                    self.handle_agent_command(*command);
+                    return;
+                }
+                if event.state == ElementState::Pressed
+                    && (self.agent_panel.focused
+                        || (self.agent_panel.visible
+                            && matches!(event.logical_key, Key::Named(NamedKey::Escape))))
+                {
+                    let action = self
+                        .agent_panel
+                        .key_pressed(translated.as_ref(), &event.logical_key);
+                    self.handle_agent_panel_action(action);
                     return;
                 }
                 if self.handle_completion_key(&event) {
@@ -1071,12 +1623,33 @@ impl ApplicationHandler<LspEvent> for Application {
             }
             WindowEvent::Ime(event) => {
                 if let Some(input) = self.input.handle_ime(event) {
-                    self.apply_input(input);
+                    if self.modal_is_visible() {
+                        let EditorInput::InsertText(text) = input else {
+                            return;
+                        };
+                        let viewport = self.gpu.as_ref().expect("GPU state exists").logical_size();
+                        let outcome = self
+                            .modal
+                            .as_mut()
+                            .expect("visible modal exists")
+                            .text_input(text, viewport);
+                        self.handle_modal_outcome(outcome);
+                    } else if self.agent_panel.focused {
+                        let EditorInput::InsertText(text) = input else {
+                            return;
+                        };
+                        self.agent_panel.text_input(text);
+                        self.refresh_agent_panel_view();
+                    } else {
+                        self.apply_input(input);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
                 self.poll_project_scan();
+                self.poll_git_task();
                 self.sync_modal_view();
+                self.sync_agent_panel_view();
                 self.render_frame(event_loop);
             }
             _ => {}
@@ -1084,7 +1657,7 @@ impl ApplicationHandler<LspEvent> for Application {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.modal_is_visible() {
+        if self.modal_is_visible() || self.splash_visible {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
@@ -1094,7 +1667,23 @@ impl ApplicationHandler<LspEvent> for Application {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: LspEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::Language(event) => self.handle_lsp_event(event),
+            AppEvent::Agent(event) => {
+                crate::agent::reduce(&mut self.agent_state, event);
+                self.agent_panel.mark_event_arrived();
+                self.sync_agent_panel_view();
+                if let Some(gpu) = self.gpu.as_ref() {
+                    gpu.window().request_redraw();
+                }
+            }
+        }
+    }
+}
+
+impl Application {
+    fn handle_lsp_event(&mut self, event: LspEvent) {
         let Some(outcome) = self.lsp.handle_event(event) else {
             return;
         };
@@ -1168,6 +1757,7 @@ impl ApplicationHandler<LspEvent> for Application {
                     .as_mut()
                     .expect("definition target was opened")
                     .go_to_position(result.target);
+                self.hide_splash();
                 self.finish_document_transition();
             }
             LspOutcome::ServerStopped => {
@@ -1184,9 +1774,14 @@ impl ApplicationHandler<LspEvent> for Application {
 
 #[cfg(test)]
 mod tests {
+    use glyphon::Action;
     use winit::keyboard::{Key, NamedKey};
 
-    use super::{CompletionKeyCommand, completion_key_command, scroll_completion_selection};
+    use super::{
+        CompletionKeyCommand, completion_key_command, editor_input_dismisses_splash,
+        scroll_completion_selection,
+    };
+    use crate::input::EditorInput;
 
     #[test]
     fn tab_accepts_the_selected_completion() {
@@ -1203,5 +1798,24 @@ mod tests {
         assert_eq!(scroll_completion_selection(2, 5, &mut remainder, 12.0), 3);
         assert_eq!(scroll_completion_selection(3, 5, &mut remainder, 240.0), 4);
         assert_eq!(scroll_completion_selection(4, 5, &mut remainder, -48.0), 2);
+    }
+
+    #[test]
+    fn splash_dismisses_for_editor_text_and_actions_only() {
+        assert!(editor_input_dismisses_splash(&EditorInput::InsertText(
+            "x".to_string()
+        )));
+        assert!(editor_input_dismisses_splash(&EditorInput::Action(
+            Action::Enter
+        )));
+        assert!(!editor_input_dismisses_splash(&EditorInput::PointerClick(
+            [10.0, 20.0]
+        )));
+        assert!(!editor_input_dismisses_splash(&EditorInput::PointerDrag([
+            10.0, 20.0
+        ])));
+        assert!(!editor_input_dismisses_splash(&EditorInput::Scroll([
+            0.0, 12.0
+        ])));
     }
 }

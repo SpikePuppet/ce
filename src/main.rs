@@ -1,11 +1,16 @@
+mod agent;
 mod app;
+mod app_event;
 mod clipboard;
 mod cursor;
 mod document;
 mod editor;
+mod git;
+mod git_screen;
 mod gpu;
 mod input;
 mod lsp;
+mod markdown;
 mod modal;
 mod project;
 mod render;

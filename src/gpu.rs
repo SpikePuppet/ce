@@ -12,12 +12,13 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+use crate::agent::AgentPanelView;
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo};
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
 use crate::modal::ModalView;
-use crate::render::Renderer;
+use crate::render::{Renderer, SplashAction};
 use crate::theme;
 
 #[derive(Debug)]
@@ -210,6 +211,10 @@ impl GpuState {
         self.renderer.break_history_group();
     }
 
+    pub fn toggle_markdown_presentation(&mut self) -> bool {
+        self.renderer.toggle_markdown_presentation()
+    }
+
     pub fn apply_clipboard_command<C: ClipboardProvider>(
         &mut self,
         command: ClipboardCommand,
@@ -334,8 +339,26 @@ impl GpuState {
         self.renderer.set_cursor_visible(visible);
     }
 
+    pub fn set_splash_visible(&mut self, visible: bool) {
+        self.renderer.set_splash_visible(visible);
+    }
+
+    pub fn splash_action_at_position(&self, position: [f32; 2]) -> Option<SplashAction> {
+        self.renderer
+            .splash_action_at_position(position, self.logical_size())
+    }
+
+    pub fn update_splash_hover(&mut self, position: [f32; 2]) -> bool {
+        let logical_size = self.logical_size();
+        self.renderer.update_splash_hover(position, logical_size)
+    }
+
     pub fn set_modal_view(&mut self, view: Option<ModalView>) {
         self.renderer.set_modal_view(view);
+    }
+
+    pub fn set_agent_panel_view(&mut self, view: Option<AgentPanelView>) {
+        self.renderer.set_agent_panel_view(view);
     }
 
     pub fn render(&mut self) -> Result<RenderOutcome, GpuError> {

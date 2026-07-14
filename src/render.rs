@@ -1,7 +1,7 @@
 use std::mem;
 
 use bytemuck::{Pod, Zeroable};
-use glyphon::cosmic_text::{Attrs, Buffer as TextBuffer, Family, Metrics, Shaping, Wrap};
+use glyphon::cosmic_text::{Align, Attrs, Buffer as TextBuffer, Family, Metrics, Shaping, Wrap};
 use glyphon::{
     Cache, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
     Viewport,
@@ -17,6 +17,7 @@ use wgpu::{
 };
 use winit::dpi::PhysicalSize;
 
+use crate::agent::{AgentPanelLayout, AgentPanelMode, AgentPanelView};
 use crate::clipboard::ClipboardProvider;
 use crate::document::{DocumentError, DocumentInfo, Documents};
 use crate::editor::{
@@ -25,7 +26,7 @@ use crate::editor::{
 };
 use crate::input::{ClipboardCommand, EditorCommand, EditorInput, HistoryCommand};
 use crate::lsp::{CompletionItem, DiagnosticUpdate, LspDocument, Position};
-use crate::modal::{ModalGeometry, ModalView};
+use crate::modal::{ModalGeometry, ModalLayout, ModalRowTone, ModalView};
 use crate::theme;
 
 const INITIAL_RECTANGLE_CAPACITY: usize = 16;
@@ -34,6 +35,20 @@ const INITIAL_RECTANGLE_CAPACITY: usize = 16;
 pub enum TabAction {
     Reveal,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum SplashAction {
+    OpenFile,
+    OpenDirectory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+pub struct SplashGeometry {
+    pub open_file: Rectangle,
+    pub open_directory: Rectangle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,6 +92,10 @@ struct ViewportUniform {
     size: [f32; 2],
     _padding: [f32; 2],
 }
+
+const SPLASH_MARK: &str = "       ####  ######\n      ##     ##\n      ##     #####\n      ##     ##\n       ####  ######";
+const SPLASH_DIVIDER_WIDTH: f32 = 160.0;
+const SPLASH_DIVIDER_HEIGHT: f32 = 1.0;
 
 struct RectangleRenderer {
     pipeline: RenderPipeline,
@@ -230,14 +249,374 @@ impl RectangleRenderer {
     }
 }
 
+struct SplashLayout {
+    content_origin: [f32; 2],
+    content_width: f32,
+    mark_origin: [f32; 2],
+    mark_size: [f32; 2],
+    divider: Rectangle,
+    tagline_origin: [f32; 2],
+    tagline_size: [f32; 2],
+    actions: SplashGeometry,
+}
+
+struct SplashTextState {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    mark_buffer: TextBuffer,
+    tagline_buffer: TextBuffer,
+    open_file_label: TextBuffer,
+    open_file_shortcut: TextBuffer,
+    open_directory_label: TextBuffer,
+    open_directory_shortcut: TextBuffer,
+    cached_content_width: Option<f32>,
+    scene_rectangles: Vec<Rectangle>,
+    hovered_action: Option<SplashAction>,
+    prepared: bool,
+}
+
+impl SplashTextState {
+    fn new() -> Self {
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let mark_metrics =
+            Metrics::new(theme::SPLASH_MARK_FONT_SIZE, theme::SPLASH_MARK_LINE_HEIGHT);
+        let body_metrics = Metrics::new(theme::FONT_SIZE, theme::LINE_HEIGHT);
+
+        let mut mark_buffer = TextBuffer::new(&mut font_system, mark_metrics);
+        mark_buffer.set_wrap(Wrap::None);
+        let mut tagline_buffer = TextBuffer::new(&mut font_system, body_metrics);
+        tagline_buffer.set_wrap(Wrap::None);
+        let mut open_file_label = TextBuffer::new(&mut font_system, body_metrics);
+        open_file_label.set_wrap(Wrap::None);
+        let mut open_file_shortcut = TextBuffer::new(&mut font_system, body_metrics);
+        open_file_shortcut.set_wrap(Wrap::None);
+        let mut open_directory_label = TextBuffer::new(&mut font_system, body_metrics);
+        open_directory_label.set_wrap(Wrap::None);
+        let mut open_directory_shortcut = TextBuffer::new(&mut font_system, body_metrics);
+        open_directory_shortcut.set_wrap(Wrap::None);
+
+        mark_buffer.set_text(
+            SPLASH_MARK,
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            None,
+        );
+        tagline_buffer.set_text(
+            "It's just a code editor",
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            None,
+        );
+        open_file_label.set_text(
+            "Open File",
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            None,
+        );
+        open_file_shortcut.set_text(
+            "Cmd+O",
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            Some(Align::Right),
+        );
+        open_directory_label.set_text(
+            "Open Directory",
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            None,
+        );
+        open_directory_shortcut.set_text(
+            "Cmd+Shift+O",
+            &splash_text_attributes(),
+            Shaping::Advanced,
+            Some(Align::Right),
+        );
+
+        Self {
+            font_system,
+            swash_cache,
+            mark_buffer,
+            tagline_buffer,
+            open_file_label,
+            open_file_shortcut,
+            open_directory_label,
+            open_directory_shortcut,
+            cached_content_width: None,
+            scene_rectangles: Vec::with_capacity(12),
+            hovered_action: None,
+            prepared: false,
+        }
+    }
+
+    fn prepare(&mut self, logical_viewport: [f32; 2], hovered_action: Option<SplashAction>) {
+        let layout = splash_layout(logical_viewport);
+        if self.cached_content_width != Some(layout.content_width) {
+            self.mark_buffer
+                .set_size(Some(layout.content_width), Some(layout.mark_size[1]));
+            self.tagline_buffer
+                .set_size(Some(layout.content_width), Some(layout.tagline_size[1]));
+            let action_text_width =
+                (layout.content_width - 2.0 * theme::SPLASH_ACTION_HORIZONTAL_PADDING).max(1.0);
+            let action_text_height = theme::SPLASH_ACTION_HEIGHT;
+            for buffer in [
+                &mut self.open_file_label,
+                &mut self.open_file_shortcut,
+                &mut self.open_directory_label,
+                &mut self.open_directory_shortcut,
+            ] {
+                buffer.set_size(Some(action_text_width), Some(action_text_height));
+            }
+            self.cached_content_width = Some(layout.content_width);
+        }
+
+        for buffer in [
+            &mut self.mark_buffer,
+            &mut self.tagline_buffer,
+            &mut self.open_file_label,
+            &mut self.open_file_shortcut,
+            &mut self.open_directory_label,
+            &mut self.open_directory_shortcut,
+        ] {
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        self.hovered_action = hovered_action;
+        self.scene_rectangles = splash_rectangles(layout.actions, layout.divider, hovered_action);
+        self.prepared = true;
+    }
+
+    fn hide(&mut self) {
+        self.hovered_action = None;
+        self.prepared = false;
+        self.scene_rectangles.clear();
+    }
+
+    #[cfg(test)]
+    fn has_shaped_glyphs(&self) -> bool {
+        [
+            &self.mark_buffer,
+            &self.tagline_buffer,
+            &self.open_file_label,
+            &self.open_file_shortcut,
+            &self.open_directory_label,
+            &self.open_directory_shortcut,
+        ]
+        .into_iter()
+        .all(buffer_has_shaped_glyphs)
+    }
+}
+
+struct SplashRenderState {
+    rectangles: RectangleRenderer,
+    text_renderer: TextRenderer,
+    text: SplashTextState,
+    hovered_action: Option<SplashAction>,
+    visible: bool,
+}
+
+struct SplashPrepareContext<'a> {
+    device: &'a Device,
+    queue: &'a Queue,
+    physical_size: PhysicalSize<u32>,
+    scale_factor: f32,
+    viewport: &'a Viewport,
+    atlas: &'a mut TextAtlas,
+    logical_viewport: [f32; 2],
+}
+
+impl SplashRenderState {
+    fn new(device: &Device, surface_format: TextureFormat, atlas: &mut TextAtlas) -> Self {
+        let rectangles = RectangleRenderer::new(device, surface_format);
+        let text_renderer = TextRenderer::new(atlas, device, MultisampleState::default(), None);
+
+        Self {
+            rectangles,
+            text_renderer,
+            text: SplashTextState::new(),
+            hovered_action: None,
+            visible: false,
+        }
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        self.hovered_action = None;
+        self.text.hide();
+    }
+
+    fn action_at_position(
+        &self,
+        position: [f32; 2],
+        logical_viewport: [f32; 2],
+    ) -> Option<SplashAction> {
+        self.visible
+            .then(|| splash_action_at_position(position, splash_layout(logical_viewport).actions))
+            .flatten()
+    }
+
+    fn update_hover(&mut self, position: [f32; 2], logical_viewport: [f32; 2]) -> bool {
+        if !self.visible {
+            return update_splash_hover_state(
+                &mut self.hovered_action,
+                [-1.0, -1.0],
+                logical_viewport,
+            );
+        }
+        update_splash_hover_state(&mut self.hovered_action, position, logical_viewport)
+    }
+
+    fn prepare(&mut self, context: SplashPrepareContext<'_>) -> Result<(), glyphon::PrepareError> {
+        if !self.visible {
+            self.text.hide();
+            self.rectangles.prepare(
+                context.device,
+                context.queue,
+                context.physical_size,
+                context.scale_factor,
+                &[],
+            );
+            return Ok(());
+        }
+
+        self.text
+            .prepare(context.logical_viewport, self.hovered_action);
+        self.rectangles.prepare(
+            context.device,
+            context.queue,
+            context.physical_size,
+            context.scale_factor,
+            &self.text.scene_rectangles,
+        );
+
+        let layout = splash_layout(context.logical_viewport);
+        let action_text_offset = [
+            theme::SPLASH_ACTION_HORIZONTAL_PADDING,
+            (theme::SPLASH_ACTION_HEIGHT - theme::LINE_HEIGHT) * 0.5,
+        ];
+        let action_text_size = [
+            (layout.content_width - 2.0 * theme::SPLASH_ACTION_HORIZONTAL_PADDING).max(1.0),
+            theme::SPLASH_ACTION_HEIGHT,
+        ];
+        let open_file_text = Rectangle::new(
+            [
+                layout.actions.open_file.origin[0] + action_text_offset[0],
+                layout.actions.open_file.origin[1] + action_text_offset[1],
+            ],
+            action_text_size,
+            [0.0; 4],
+        );
+        let open_directory_text = Rectangle::new(
+            [
+                layout.actions.open_directory.origin[0] + action_text_offset[0],
+                layout.actions.open_directory.origin[1] + action_text_offset[1],
+            ],
+            action_text_size,
+            [0.0; 4],
+        );
+        let mut areas = Vec::with_capacity(7);
+        areas.push(TextArea {
+            buffer: &self.text.mark_buffer,
+            left: layout.mark_origin[0] * context.scale_factor,
+            top: layout.mark_origin[1] * context.scale_factor,
+            scale: context.scale_factor,
+            bounds: physical_bounds(
+                Rectangle::new(layout.content_origin, layout.mark_size, [0.0; 4]),
+                context.scale_factor,
+            ),
+            default_color: theme::SPLASH_MARK_TEXT,
+            custom_glyphs: &[],
+        });
+        areas.push(TextArea {
+            buffer: &self.text.tagline_buffer,
+            left: layout.tagline_origin[0] * context.scale_factor,
+            top: layout.tagline_origin[1] * context.scale_factor,
+            scale: context.scale_factor,
+            bounds: physical_bounds(
+                Rectangle::new(layout.tagline_origin, layout.tagline_size, [0.0; 4]),
+                context.scale_factor,
+            ),
+            default_color: theme::EDITOR_TEXT,
+            custom_glyphs: &[],
+        });
+        for (buffer, color, rectangle) in [
+            (
+                &self.text.open_file_label,
+                theme::EDITOR_TEXT,
+                open_file_text,
+            ),
+            (
+                &self.text.open_file_shortcut,
+                theme::SPLASH_SHORTCUT_TEXT,
+                open_file_text,
+            ),
+            (
+                &self.text.open_directory_label,
+                theme::EDITOR_TEXT,
+                open_directory_text,
+            ),
+            (
+                &self.text.open_directory_shortcut,
+                theme::SPLASH_SHORTCUT_TEXT,
+                open_directory_text,
+            ),
+        ] {
+            areas.push(TextArea {
+                buffer,
+                left: rectangle.origin[0] * context.scale_factor,
+                top: rectangle.origin[1] * context.scale_factor,
+                scale: context.scale_factor,
+                bounds: physical_bounds(rectangle, context.scale_factor),
+                default_color: color,
+                custom_glyphs: &[],
+            });
+        }
+
+        self.text_renderer.prepare(
+            context.device,
+            context.queue,
+            &mut self.text.font_system,
+            context.atlas,
+            context.viewport,
+            areas,
+            &mut self.text.swash_cache,
+        )?;
+        Ok(())
+    }
+
+    fn render<'pass>(
+        &'pass self,
+        render_pass: &mut RenderPass<'pass>,
+        atlas: &'pass TextAtlas,
+        viewport: &'pass Viewport,
+    ) -> Result<(), glyphon::RenderError> {
+        if !self.visible || !self.text.prepared {
+            return Ok(());
+        }
+        self.rectangles.render(render_pass);
+        self.text_renderer.render(atlas, viewport, render_pass)
+    }
+}
+
 struct ModalTextState {
     font_system: FontSystem,
     swash_cache: SwashCache,
+    title_buffer: TextBuffer,
+    subtitle_buffer: TextBuffer,
+    header_action_buffer: TextBuffer,
     body_buffer: TextBuffer,
+    status_buffer: TextBuffer,
+    composer_label_buffer: TextBuffer,
+    composer_field_buffer: TextBuffer,
+    composer_button_buffer: TextBuffer,
     close_buffer: TextBuffer,
+    cached_title_text: String,
     cached_body_text: String,
+    cached_status_text: String,
     cached_body_size: Option<[f32; 2]>,
-    cached_close_size: Option<[f32; 2]>,
     scene_rectangles: Vec<Rectangle>,
     prepared: bool,
 }
@@ -248,56 +627,134 @@ impl ModalTextState {
         let swash_cache = SwashCache::new();
         let metrics = Metrics::new(theme::FONT_SIZE, theme::LINE_HEIGHT);
 
-        let mut body_buffer = TextBuffer::new(&mut font_system, metrics);
-        body_buffer.set_wrap(Wrap::None);
-        let mut close_buffer = TextBuffer::new(&mut font_system, metrics);
-        close_buffer.set_wrap(Wrap::None);
+        let title_buffer = modal_buffer(&mut font_system, metrics);
+        let subtitle_buffer = modal_buffer(&mut font_system, metrics);
+        let header_action_buffer = modal_buffer(&mut font_system, metrics);
+        let body_buffer = modal_buffer(&mut font_system, metrics);
+        let status_buffer = modal_buffer(&mut font_system, metrics);
+        let composer_label_buffer = modal_buffer(&mut font_system, metrics);
+        let composer_field_buffer = modal_buffer(&mut font_system, metrics);
+        let composer_button_buffer = modal_buffer(&mut font_system, metrics);
+        let close_buffer = modal_buffer(&mut font_system, metrics);
 
         Self {
             font_system,
             swash_cache,
+            title_buffer,
+            subtitle_buffer,
+            header_action_buffer,
             body_buffer,
+            status_buffer,
+            composer_label_buffer,
+            composer_field_buffer,
+            composer_button_buffer,
             close_buffer,
+            cached_title_text: String::new(),
             cached_body_text: String::new(),
+            cached_status_text: String::new(),
             cached_body_size: None,
-            cached_close_size: None,
             scene_rectangles: Vec::with_capacity(16),
             prepared: false,
         }
     }
 
     fn prepare(&mut self, view: &ModalView, logical_viewport: [f32; 2]) -> ModalGeometry {
-        let geometry = ModalGeometry::for_viewport(logical_viewport);
-        let body_size = [geometry.content_size[0], (geometry.size[1] - 16.0).max(1.0)];
-        if self.cached_body_size != Some(body_size) {
-            self.body_buffer
-                .set_size(Some(body_size[0]), Some(body_size[1]));
-            self.cached_body_size = Some(body_size);
-        }
+        let geometry = ModalGeometry::for_viewport_with_layout(
+            logical_viewport,
+            ModalLayout {
+                composer: view.composer.is_some(),
+                content_rows: view
+                    .composer
+                    .as_ref()
+                    .map(|_| view.total_rows.clamp(7, 14)),
+            },
+        );
+        let body_size = geometry.content_size;
+        self.cached_title_text.clone_from(&view.title);
+        self.cached_body_text = modal_rows_text(view);
+        self.cached_status_text.clone_from(&view.status);
+        self.cached_body_size = Some(body_size);
 
-        let body_text = modal_text(view, geometry.visible_rows);
-        if self.cached_body_text != body_text {
-            self.body_buffer.set_text(
-                &body_text,
-                &modal_text_attributes(),
-                Shaping::Advanced,
-                None,
-            );
-            self.cached_body_text = body_text;
-        }
-        self.body_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.title_buffer,
+            &view.title,
+            [geometry.size[0], theme::LINE_HEIGHT],
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.subtitle_buffer,
+            &view.subtitle,
+            [geometry.size[0], theme::LINE_HEIGHT],
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.header_action_buffer,
+            view.header_action
+                .as_ref()
+                .map_or("", |action| action.label.as_str()),
+            geometry.header_action_size,
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.body_buffer,
+            &self.cached_body_text,
+            body_size,
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.status_buffer,
+            &view.status,
+            geometry.status_size,
+        );
 
-        let close_size = geometry.close_size;
-        if self.cached_close_size != Some(close_size) {
-            self.close_buffer
-                .set_size(Some(close_size[0]), Some(close_size[1]));
-            self.cached_close_size = Some(close_size);
-        }
-        self.close_buffer
-            .set_text("×", &modal_text_attributes(), Shaping::Advanced, None);
-        self.close_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        let (composer_label, composer_field, composer_button) = view.composer.as_ref().map_or(
+            ("", String::new(), ""),
+            |composer| {
+                let field_text = if composer.value.is_empty() {
+                    if composer.focused {
+                        format!("|  {}", composer.placeholder)
+                    } else {
+                        composer.placeholder.clone()
+                    }
+                } else {
+                    let mut value = composer.value.clone();
+                    if composer.focused {
+                        value.insert(composer.cursor.min(value.len()), '|');
+                    }
+                    value
+                };
+                (
+                    composer.label.as_str(),
+                    field_text,
+                    composer.button_label.as_str(),
+                )
+            },
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.composer_label_buffer,
+            composer_label,
+            geometry.composer_label_size,
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.composer_field_buffer,
+            &composer_field,
+            geometry.composer_field_size,
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.composer_button_buffer,
+            composer_button,
+            geometry.composer_button_size,
+        );
+        prepare_modal_buffer(
+            &mut self.font_system,
+            &mut self.close_buffer,
+            "×",
+            geometry.close_size,
+        );
 
         self.scene_rectangles =
             modal_rectangles(view, geometry, logical_viewport[0], logical_viewport[1]);
@@ -319,6 +776,23 @@ impl ModalTextState {
     fn has_shaped_close_glyphs(&self) -> bool {
         buffer_has_shaped_glyphs(&self.close_buffer)
     }
+}
+
+fn modal_buffer(font_system: &mut FontSystem, metrics: Metrics) -> TextBuffer {
+    let mut buffer = TextBuffer::new(font_system, metrics);
+    buffer.set_wrap(Wrap::None);
+    buffer
+}
+
+fn prepare_modal_buffer(
+    font_system: &mut FontSystem,
+    buffer: &mut TextBuffer,
+    text: &str,
+    size: [f32; 2],
+) {
+    buffer.set_size(Some(size[0].max(1.0)), Some(size[1].max(1.0)));
+    buffer.set_text(text, &modal_text_attributes(), Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
 }
 
 struct ModalRenderState {
@@ -427,6 +901,152 @@ impl ModalRenderState {
     }
 }
 
+struct AgentPanelTextState {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    buffer: TextBuffer,
+    cached_text: String,
+    cached_size: Option<[f32; 2]>,
+    scene_rectangles: Vec<Rectangle>,
+    prepared: bool,
+}
+
+impl AgentPanelTextState {
+    fn new() -> Self {
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let metrics = Metrics::new(theme::FONT_SIZE, theme::LINE_HEIGHT);
+        let mut buffer = TextBuffer::new(&mut font_system, metrics);
+        buffer.set_wrap(Wrap::Word);
+
+        Self {
+            font_system,
+            swash_cache,
+            buffer,
+            cached_text: String::new(),
+            cached_size: None,
+            scene_rectangles: Vec::with_capacity(32),
+            prepared: false,
+        }
+    }
+
+    fn prepare(&mut self, view: &AgentPanelView, layout: AgentPanelLayout) {
+        let Some(drawer) = layout.drawer else {
+            self.hide();
+            return;
+        };
+        let size = [drawer.size[0].max(1.0), drawer.size[1].max(1.0)];
+        if self.cached_size != Some(size) {
+            self.buffer
+                .set_size(Some((size[0] - 24.0).max(1.0)), Some(size[1]));
+            self.cached_size = Some(size);
+        }
+        let text = agent_panel_text(view);
+        if self.cached_text != text {
+            self.buffer
+                .set_text(&text, &modal_text_attributes(), Shaping::Advanced, None);
+            self.cached_text = text;
+        }
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.scene_rectangles = agent_panel_rectangles(layout, view.focused);
+        self.prepared = true;
+    }
+
+    fn hide(&mut self) {
+        self.prepared = false;
+        self.scene_rectangles.clear();
+    }
+}
+
+struct AgentPanelRenderState {
+    rectangles: RectangleRenderer,
+    text_renderer: TextRenderer,
+    text: AgentPanelTextState,
+}
+
+impl AgentPanelRenderState {
+    fn new(device: &Device, surface_format: TextureFormat, atlas: &mut TextAtlas) -> Self {
+        Self {
+            rectangles: RectangleRenderer::new(device, surface_format),
+            text_renderer: TextRenderer::new(atlas, device, MultisampleState::default(), None),
+            text: AgentPanelTextState::new(),
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        context: ModalPrepareContext<'_>,
+        view: Option<&AgentPanelView>,
+    ) -> Result<(), glyphon::PrepareError> {
+        let layout = view.map_or_else(
+            || AgentPanelLayout::calculate(context.logical_viewport, false, 0.4),
+            |view| {
+                AgentPanelLayout::calculate(
+                    context.logical_viewport,
+                    view.visible,
+                    view.width_ratio,
+                )
+            },
+        );
+        let Some(view) = view.filter(|view| view.visible) else {
+            self.text.hide();
+            self.rectangles.prepare(
+                context.device,
+                context.queue,
+                context.physical_size,
+                context.scale_factor,
+                &[],
+            );
+            return Ok(());
+        };
+
+        self.text.prepare(view, layout);
+        self.rectangles.prepare(
+            context.device,
+            context.queue,
+            context.physical_size,
+            context.scale_factor,
+            &self.text.scene_rectangles,
+        );
+
+        let drawer = layout
+            .drawer
+            .expect("visible agent panel layout includes drawer");
+        let text_area = TextArea {
+            buffer: &self.text.buffer,
+            left: (drawer.origin[0] + 12.0) * context.scale_factor,
+            top: 12.0 * context.scale_factor,
+            scale: context.scale_factor,
+            bounds: physical_bounds(drawer, context.scale_factor),
+            default_color: theme::MODAL_TEXT,
+            custom_glyphs: &[],
+        };
+        self.text_renderer.prepare(
+            context.device,
+            context.queue,
+            &mut self.text.font_system,
+            context.atlas,
+            context.viewport,
+            [text_area],
+            &mut self.text.swash_cache,
+        )?;
+        Ok(())
+    }
+
+    fn render<'pass>(
+        &'pass self,
+        render_pass: &mut RenderPass<'pass>,
+        atlas: &'pass TextAtlas,
+        viewport: &'pass Viewport,
+    ) -> Result<(), glyphon::RenderError> {
+        if !self.text.prepared {
+            return Ok(());
+        }
+        self.rectangles.render(render_pass);
+        self.text_renderer.render(atlas, viewport, render_pass)
+    }
+}
+
 fn create_instance_buffer(device: &Device, capacity: usize) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some("rectangle instance buffer"),
@@ -439,7 +1059,9 @@ fn create_instance_buffer(device: &Device, capacity: usize) -> Buffer {
 pub struct Renderer {
     rectangles: RectangleRenderer,
     overlay_rectangles: RectangleRenderer,
+    splash: SplashRenderState,
     modal: ModalRenderState,
+    agent_panel: AgentPanelRenderState,
     text_viewport: Viewport,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -448,6 +1070,7 @@ pub struct Renderer {
     scene_rectangles: Vec<Rectangle>,
     overlay_scene_rectangles: Vec<Rectangle>,
     modal_view: Option<ModalView>,
+    agent_panel_view: Option<AgentPanelView>,
     cursor_visible: bool,
     hovered_tab_action: Option<(usize, TabAction)>,
 }
@@ -463,12 +1086,16 @@ impl Renderer {
             TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
         let overlay_text_renderer =
             TextRenderer::new(&mut text_atlas, device, MultisampleState::default(), None);
+        let splash = SplashRenderState::new(device, surface_format, &mut text_atlas);
         let modal = ModalRenderState::new(device, surface_format, &mut text_atlas);
+        let agent_panel = AgentPanelRenderState::new(device, surface_format, &mut text_atlas);
 
         Self {
             rectangles,
             overlay_rectangles,
+            splash,
             modal,
+            agent_panel,
             text_viewport,
             text_atlas,
             text_renderer,
@@ -477,6 +1104,7 @@ impl Renderer {
             scene_rectangles: Vec::with_capacity(INITIAL_RECTANGLE_CAPACITY),
             overlay_scene_rectangles: Vec::with_capacity(7),
             modal_view: None,
+            agent_panel_view: None,
             cursor_visible: false,
             hovered_tab_action: None,
         }
@@ -496,6 +1124,10 @@ impl Renderer {
 
     pub fn break_history_group(&mut self) {
         self.documents.break_history_group();
+    }
+
+    pub fn toggle_markdown_presentation(&mut self) -> bool {
+        self.documents.toggle_active_presentation()
     }
 
     pub fn apply_clipboard_command<C: ClipboardProvider>(
@@ -531,7 +1163,11 @@ impl Renderer {
     }
 
     pub fn tab_at_position(&self, position: [f32; 2], viewport_width: f32) -> Option<usize> {
-        tab_at_position(position, viewport_width, self.documents.len())
+        tab_at_position(
+            position,
+            self.editor_hit_width(viewport_width),
+            self.documents.len(),
+        )
     }
 
     pub fn tab_action_at_position(
@@ -539,7 +1175,8 @@ impl Renderer {
         position: [f32; 2],
         viewport_width: f32,
     ) -> Option<(usize, TabAction)> {
-        tab_action_at_position(position, viewport_width, self.documents.len()).and_then(
+        let editor_width = self.editor_hit_width(viewport_width);
+        tab_action_at_position(position, editor_width, self.documents.len()).and_then(
             |(index, action)| {
                 (action != TabAction::Reveal || self.documents.info_at(index)?.path.is_some())
                     .then_some((index, action))
@@ -618,15 +1255,15 @@ impl Renderer {
     }
 
     pub fn update_tab_path_hover(&mut self, position: [f32; 2], viewport_width: f32) -> bool {
+        let editor_width = self.editor_hit_width(viewport_width);
         let hovered_action = self.tab_action_at_position(position, viewport_width);
         let action_changed = self.hovered_tab_action != hovered_action;
         self.hovered_tab_action = hovered_action;
         let path_changed = if hovered_action.is_some() {
             self.documents
-                .update_tab_path_hover([-1.0, -1.0], viewport_width)
+                .update_tab_path_hover([-1.0, -1.0], editor_width)
         } else {
-            self.documents
-                .update_tab_path_hover(position, viewport_width)
+            self.documents.update_tab_path_hover(position, editor_width)
         };
         action_changed || path_changed
     }
@@ -639,6 +1276,26 @@ impl Renderer {
         self.modal_view = view;
     }
 
+    pub fn set_agent_panel_view(&mut self, view: Option<AgentPanelView>) {
+        self.agent_panel_view = view;
+    }
+
+    pub fn set_splash_visible(&mut self, visible: bool) {
+        self.splash.set_visible(visible);
+    }
+
+    pub fn splash_action_at_position(
+        &self,
+        position: [f32; 2],
+        logical_viewport: [f32; 2],
+    ) -> Option<SplashAction> {
+        self.splash.action_at_position(position, logical_viewport)
+    }
+
+    pub fn update_splash_hover(&mut self, position: [f32; 2], logical_viewport: [f32; 2]) -> bool {
+        self.splash.update_hover(position, logical_viewport)
+    }
+
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -648,16 +1305,22 @@ impl Renderer {
     ) -> Result<(), glyphon::PrepareError> {
         let (logical_width, logical_height) = logical_extent(physical_size, scale_factor);
         let modal_view = self.modal_view.clone();
-        let tab_count = self.documents.len();
-        let active_tab = self.documents.active_index();
-        let tab_width = tab_width(logical_width, tab_count);
-        let hovered_tab_action = self.hovered_tab_action;
-        let dirty_tabs = (0..tab_count)
-            .map(|index| self.documents.info_at(index).is_some_and(|info| info.dirty))
-            .collect::<Vec<_>>();
-        let editor = self.documents.active_editor_mut();
-        editor.resize(logical_width, logical_height);
-        let layout = editor.layout();
+        let agent_panel_view = self.agent_panel_view.clone();
+        let agent_panel_layout = agent_panel_view.as_ref().map_or_else(
+            || AgentPanelLayout::calculate([logical_width, logical_height], false, 0.4),
+            |view| {
+                AgentPanelLayout::calculate(
+                    [logical_width, logical_height],
+                    view.visible,
+                    view.width_ratio,
+                )
+            },
+        );
+        let editor_view_width = if agent_panel_layout.mode == AgentPanelMode::Narrow {
+            0.0
+        } else {
+            agent_panel_layout.editor_width
+        };
 
         self.text_viewport.update(
             queue,
@@ -666,6 +1329,53 @@ impl Renderer {
                 height: physical_size.height,
             },
         );
+
+        if self.splash.visible {
+            self.scene_rectangles.clear();
+            self.overlay_scene_rectangles.clear();
+            self.splash.prepare(SplashPrepareContext {
+                device,
+                queue,
+                physical_size,
+                scale_factor,
+                viewport: &self.text_viewport,
+                atlas: &mut self.text_atlas,
+                logical_viewport: [logical_width, logical_height],
+            })?;
+            return self.modal.prepare(
+                ModalPrepareContext {
+                    device,
+                    queue,
+                    physical_size,
+                    scale_factor,
+                    viewport: &self.text_viewport,
+                    atlas: &mut self.text_atlas,
+                    logical_viewport: [logical_width, logical_height],
+                },
+                modal_view.as_ref(),
+            );
+        }
+
+        self.splash.prepare(SplashPrepareContext {
+            device,
+            queue,
+            physical_size,
+            scale_factor,
+            viewport: &self.text_viewport,
+            atlas: &mut self.text_atlas,
+            logical_viewport: [logical_width, logical_height],
+        })?;
+
+        let tab_count = self.documents.len();
+        let active_tab = self.documents.active_index();
+        let tab_width = tab_width(editor_view_width, tab_count);
+        let hovered_tab_action = self.hovered_tab_action;
+        let dirty_tabs = (0..tab_count)
+            .map(|index| self.documents.info_at(index).is_some_and(|info| info.dirty))
+            .collect::<Vec<_>>();
+        let editor = self.documents.active_editor_mut();
+        editor.resize(editor_view_width, logical_height);
+        let layout = editor.layout();
 
         self.scene_rectangles.clear();
         for index in 0..tab_count {
@@ -689,7 +1399,7 @@ impl Renderer {
         }
         self.scene_rectangles.push(Rectangle::new(
             [0.0, theme::TAB_BAR_HEIGHT - 1.0],
-            [logical_width, 1.0],
+            [editor_view_width, 1.0],
             theme::TAB_DIVIDER,
         ));
         for (index, dirty) in dirty_tabs.into_iter().enumerate() {
@@ -710,19 +1420,21 @@ impl Renderer {
                 ));
             }
         }
-        self.scene_rectangles.push(Rectangle::new(
-            [0.0, theme::TAB_BAR_HEIGHT],
-            [
-                layout.gutter_width,
-                (logical_height - theme::TAB_BAR_HEIGHT).max(0.0),
-            ],
-            theme::GUTTER_BACKGROUND,
-        ));
-        self.scene_rectangles.push(Rectangle::new(
-            [layout.gutter_width - 1.0, theme::TAB_BAR_HEIGHT],
-            [1.0, (logical_height - theme::TAB_BAR_HEIGHT).max(0.0)],
-            theme::GUTTER_DIVIDER,
-        ));
+        if layout.gutter_width > 0.0 {
+            self.scene_rectangles.push(Rectangle::new(
+                [0.0, theme::TAB_BAR_HEIGHT],
+                [
+                    layout.gutter_width,
+                    (logical_height - theme::TAB_BAR_HEIGHT).max(0.0),
+                ],
+                theme::GUTTER_BACKGROUND,
+            ));
+            self.scene_rectangles.push(Rectangle::new(
+                [layout.gutter_width - 1.0, theme::TAB_BAR_HEIGHT],
+                [1.0, (logical_height - theme::TAB_BAR_HEIGHT).max(0.0)],
+                theme::GUTTER_DIVIDER,
+            ));
+        }
         self.scene_rectangles
             .extend(
                 editor
@@ -732,7 +1444,7 @@ impl Renderer {
                         translate_selection_rectangle(
                             *rectangle,
                             layout,
-                            logical_width,
+                            editor_view_width,
                             logical_height,
                         )
                     }),
@@ -746,7 +1458,7 @@ impl Renderer {
                         translate_diagnostic_rectangle(
                             *rectangle,
                             layout,
-                            logical_width,
+                            editor_view_width,
                             logical_height,
                         )
                     }),
@@ -759,14 +1471,19 @@ impl Renderer {
                 .into_iter()
                 .flatten()
                 .filter_map(|scrollbar| {
-                    translate_scrollbar_rectangle(scrollbar, layout, logical_width, logical_height)
+                    translate_scrollbar_rectangle(
+                        scrollbar,
+                        layout,
+                        editor_view_width,
+                        logical_height,
+                    )
                 }),
         );
         if let Some(overlay) = overlay_geometry {
             self.overlay_scene_rectangles.extend(overlay_rectangles(
                 overlay,
                 layout,
-                logical_width,
+                editor_view_width,
                 logical_height,
             ));
         }
@@ -775,7 +1492,7 @@ impl Renderer {
             .then(|| editor.cursor_rectangle())
             .flatten()
             .and_then(|rectangle| {
-                translate_cursor_rectangle(rectangle, layout, logical_width, logical_height)
+                translate_cursor_rectangle(rectangle, layout, editor_view_width, logical_height)
             });
         if let Some(rectangle) = cursor_rectangle {
             self.scene_rectangles.push(rectangle);
@@ -795,7 +1512,7 @@ impl Renderer {
             &self.overlay_scene_rectangles,
         );
 
-        let physical_width = physical_size.width.min(i32::MAX as u32) as i32;
+        let physical_editor_width = (editor_view_width * scale_factor).round() as i32;
         let physical_height = physical_size.height.min(i32::MAX as u32) as i32;
         let gutter_right = (layout.gutter_width * scale_factor).round() as i32;
         let content_top = theme::CONTENT_TOP * scale_factor;
@@ -833,7 +1550,7 @@ impl Renderer {
             bounds: TextBounds {
                 left: gutter_right,
                 top: 0,
-                right: physical_width,
+                right: physical_editor_width,
                 bottom: physical_height,
             },
             default_color: theme::EDITOR_TEXT,
@@ -856,7 +1573,7 @@ impl Renderer {
                     geometry.size,
                     geometry.window_coordinates,
                     layout,
-                    logical_width,
+                    editor_view_width,
                     logical_height,
                     theme::OVERLAY_BACKGROUND,
                 )?;
@@ -878,7 +1595,7 @@ impl Renderer {
                     geometry.size,
                     geometry.window_coordinates,
                     layout,
-                    logical_width,
+                    editor_view_width,
                     logical_height,
                     theme::OVERLAY_BACKGROUND,
                 )?;
@@ -909,7 +1626,7 @@ impl Renderer {
                         .max(tab_left)
                         * scale_factor)
                         .round()
-                        .min(physical_width as f32) as i32,
+                        .min(physical_editor_width as f32) as i32,
                     bottom: ((tab_text_top + theme::LINE_HEIGHT) * scale_factor).floor() as i32,
                 },
                 default_color: if index == active_tab {
@@ -974,6 +1691,18 @@ impl Renderer {
             overlay_area.into_iter().chain(overlay_documentation_area),
             swash_cache,
         )?;
+        self.agent_panel.prepare(
+            ModalPrepareContext {
+                device,
+                queue,
+                physical_size,
+                scale_factor,
+                viewport: &self.text_viewport,
+                atlas: &mut self.text_atlas,
+                logical_viewport: [logical_width, logical_height],
+            },
+            agent_panel_view.as_ref(),
+        )?;
         self.modal.prepare(
             ModalPrepareContext {
                 device,
@@ -992,18 +1721,45 @@ impl Renderer {
         &'pass self,
         render_pass: &mut RenderPass<'pass>,
     ) -> Result<(), glyphon::RenderError> {
-        self.rectangles.render(render_pass);
-        self.text_renderer
-            .render(&self.text_atlas, &self.text_viewport, render_pass)?;
-        self.overlay_rectangles.render(render_pass);
-        self.overlay_text_renderer
-            .render(&self.text_atlas, &self.text_viewport, render_pass)?;
+        if self.splash.visible {
+            self.splash
+                .render(render_pass, &self.text_atlas, &self.text_viewport)?;
+        } else {
+            self.rectangles.render(render_pass);
+            self.text_renderer
+                .render(&self.text_atlas, &self.text_viewport, render_pass)?;
+            self.overlay_rectangles.render(render_pass);
+            self.overlay_text_renderer.render(
+                &self.text_atlas,
+                &self.text_viewport,
+                render_pass,
+            )?;
+            self.agent_panel
+                .render(render_pass, &self.text_atlas, &self.text_viewport)?;
+        }
         self.modal
             .render(render_pass, &self.text_atlas, &self.text_viewport)
     }
 
     pub fn finish_frame(&mut self) {
         self.text_atlas.trim();
+    }
+
+    fn editor_hit_width(&self, viewport_width: f32) -> f32 {
+        self.agent_panel_view
+            .as_ref()
+            .map_or(viewport_width, |view| {
+                let layout = AgentPanelLayout::calculate(
+                    [viewport_width, theme::INITIAL_WINDOW_HEIGHT as f32],
+                    view.visible,
+                    view.width_ratio,
+                );
+                if layout.mode == AgentPanelMode::Narrow {
+                    0.0
+                } else {
+                    layout.editor_width
+                }
+            })
     }
 }
 
@@ -1064,17 +1820,176 @@ fn tab_action_geometry(index: usize, action: TabAction, tab_width: f32) -> ([f32
     )
 }
 
+fn splash_layout(logical_viewport: [f32; 2]) -> SplashLayout {
+    let safe_width = (logical_viewport[0] - 2.0 * theme::SPLASH_MINIMUM_PADDING).max(1.0);
+    let content_width = theme::SPLASH_CONTENT_WIDTH.min(safe_width);
+    let mark_line_count = SPLASH_MARK.lines().count() as f32;
+    let mark_height = mark_line_count * theme::SPLASH_MARK_LINE_HEIGHT;
+    let tagline_height = theme::LINE_HEIGHT;
+    let actions_height = 2.0 * theme::SPLASH_ACTION_HEIGHT + theme::SPLASH_ACTION_GAP;
+    let total_height = mark_height
+        + theme::SPLASH_TAGLINE_TOP_GAP
+        + tagline_height
+        + theme::SPLASH_ACTION_TOP_GAP
+        + actions_height;
+    let content_left = ((logical_viewport[0] - content_width) * 0.5)
+        .max(theme::SPLASH_MINIMUM_PADDING)
+        .min((logical_viewport[0] - content_width).max(theme::SPLASH_MINIMUM_PADDING));
+    let available_top = (logical_viewport[1] - total_height) * 0.48;
+    let content_top = available_top.max(theme::SPLASH_MINIMUM_PADDING).min(
+        (logical_viewport[1] - total_height - theme::SPLASH_MINIMUM_PADDING)
+            .max(theme::SPLASH_MINIMUM_PADDING),
+    );
+    let mark_origin = [content_left, content_top];
+    let mark_size = [content_width, mark_height];
+    let divider_width = SPLASH_DIVIDER_WIDTH.min(content_width);
+    let divider_origin = [
+        content_left + (content_width - divider_width) * 0.5,
+        content_top + mark_height + 7.0,
+    ];
+    let tagline_origin = [
+        content_left,
+        content_top + mark_height + theme::SPLASH_TAGLINE_TOP_GAP,
+    ];
+    let first_action_top = tagline_origin[1] + tagline_height + theme::SPLASH_ACTION_TOP_GAP;
+    let open_file = Rectangle::new(
+        [content_left, first_action_top],
+        [content_width, theme::SPLASH_ACTION_HEIGHT],
+        [0.0; 4],
+    );
+    let open_directory = Rectangle::new(
+        [
+            content_left,
+            first_action_top + theme::SPLASH_ACTION_HEIGHT + theme::SPLASH_ACTION_GAP,
+        ],
+        [content_width, theme::SPLASH_ACTION_HEIGHT],
+        [0.0; 4],
+    );
+
+    SplashLayout {
+        content_origin: [content_left, content_top],
+        content_width,
+        mark_origin,
+        mark_size,
+        divider: Rectangle::new(
+            divider_origin,
+            [divider_width, SPLASH_DIVIDER_HEIGHT],
+            color_from_glyph(theme::SPLASH_MUTED_TEXT),
+        ),
+        tagline_origin,
+        tagline_size: [content_width, tagline_height],
+        actions: SplashGeometry {
+            open_file,
+            open_directory,
+        },
+    }
+}
+
+fn splash_rectangles(
+    geometry: SplashGeometry,
+    divider: Rectangle,
+    hovered_action: Option<SplashAction>,
+) -> Vec<Rectangle> {
+    let mut rectangles = Vec::with_capacity(11);
+    rectangles.push(divider);
+    for (action, rectangle) in [
+        (SplashAction::OpenFile, geometry.open_file),
+        (SplashAction::OpenDirectory, geometry.open_directory),
+    ] {
+        rectangles.push(Rectangle::new(
+            rectangle.origin,
+            rectangle.size,
+            if hovered_action == Some(action) {
+                theme::SPLASH_ACTION_HOVER_BACKGROUND
+            } else {
+                theme::SPLASH_ACTION_BACKGROUND
+            },
+        ));
+        push_tab_outline(
+            &mut rectangles,
+            rectangle.origin,
+            rectangle.size,
+            1.0,
+            if hovered_action == Some(action) {
+                theme::SPLASH_ACTION_HOVER_BORDER
+            } else {
+                theme::SPLASH_ACTION_BORDER
+            },
+        );
+    }
+    rectangles
+}
+
+fn splash_action_at_position(position: [f32; 2], geometry: SplashGeometry) -> Option<SplashAction> {
+    if contains_rectangle(position, geometry.open_file) {
+        Some(SplashAction::OpenFile)
+    } else if contains_rectangle(position, geometry.open_directory) {
+        Some(SplashAction::OpenDirectory)
+    } else {
+        None
+    }
+}
+
+fn update_splash_hover_state(
+    hovered_action: &mut Option<SplashAction>,
+    position: [f32; 2],
+    logical_viewport: [f32; 2],
+) -> bool {
+    let next_hovered_action =
+        splash_action_at_position(position, splash_layout(logical_viewport).actions);
+    let changed = *hovered_action != next_hovered_action;
+    *hovered_action = next_hovered_action;
+    changed
+}
+
+fn contains_rectangle(position: [f32; 2], rectangle: Rectangle) -> bool {
+    position[0] >= rectangle.origin[0]
+        && position[1] >= rectangle.origin[1]
+        && position[0] < rectangle.origin[0] + rectangle.size[0]
+        && position[1] < rectangle.origin[1] + rectangle.size[1]
+}
+
+fn color_from_glyph(color: glyphon::Color) -> [f32; 4] {
+    let [r, g, b, a] = color.as_rgba();
+    [
+        srgb_u8_to_linear(r),
+        srgb_u8_to_linear(g),
+        srgb_u8_to_linear(b),
+        a as f32 / 255.0,
+    ]
+}
+
+fn srgb_u8_to_linear(value: u8) -> f32 {
+    let value = value as f32 / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn modal_text_attributes() -> Attrs<'static> {
+    Attrs::new().family(Family::Name(theme::FONT_FAMILY))
+}
+
+fn splash_text_attributes() -> Attrs<'static> {
     Attrs::new().family(Family::Name(theme::FONT_FAMILY))
 }
 
 fn modal_text(view: &ModalView, visible_rows: usize) -> String {
     let mut text = String::new();
+    if let Some(action) = &view.header_action {
+        text.push_str(&action.label);
+        text.push_str("  ");
+    }
     text.push_str(&view.title);
     text.push('\n');
     text.push_str(&view.subtitle);
     text.push_str("\n\n");
     for row in &view.rows {
+        if let Some(control) = &row.control {
+            text.push_str(&format!("{:<7}", control.label));
+        }
         text.push_str(&"  ".repeat(row.depth));
         text.push_str(if row.expandable {
             if row.expanded { "▾ " } else { "▸ " }
@@ -1093,6 +2008,21 @@ fn modal_text(view: &ModalView, visible_rows: usize) -> String {
     }
     text.push('\n');
     text.push_str(&view.status);
+    if let Some(composer) = &view.composer {
+        text.push('\n');
+        let mut value = if composer.value.is_empty() {
+            composer.placeholder.clone()
+        } else {
+            composer.value.clone()
+        };
+        if composer.focused {
+            let cursor = composer.cursor.min(value.len());
+            value.insert(cursor, '|');
+        }
+        text.push_str(&value);
+        text.push_str("    ");
+        text.push_str(&composer.button_label);
+    }
     text
 }
 
@@ -1129,10 +2059,7 @@ fn modal_rectangles(
         theme::MODAL_BORDER,
     ));
     rectangles.push(Rectangle::new(
-        [
-            geometry.origin[0],
-            geometry.origin[1] + geometry.size[1] - theme::MODAL_FOOTER_HEIGHT,
-        ],
+        [geometry.origin[0], geometry.footer_origin[1]],
         [geometry.size[0], 1.0],
         theme::MODAL_BORDER,
     ));
@@ -1141,12 +2068,37 @@ fn modal_rectangles(
         geometry.close_size,
         theme::MODAL_BADGE_BACKGROUND,
     ));
+    if let Some(action) = &view.header_action {
+        rectangles.push(Rectangle::new(
+            geometry.header_action_origin,
+            geometry.header_action_size,
+            if action.enabled {
+                theme::MODAL_CONTROL_BACKGROUND
+            } else {
+                theme::MODAL_CONTROL_DISABLED
+            },
+        ));
+    }
 
     for (row_index, row) in view.rows.iter().enumerate() {
         let row_origin = [
             geometry.content_origin[0],
             geometry.content_origin[1] + row_index as f32 * theme::LINE_HEIGHT,
         ];
+        if let Some(color) = match row.tone {
+            ModalRowTone::Default => None,
+            ModalRowTone::Muted => Some(theme::MODAL_CONTROL_DISABLED),
+            ModalRowTone::Section => Some(theme::MODAL_ROW_SECTION),
+            ModalRowTone::Addition => Some(theme::MODAL_ROW_ADDITION),
+            ModalRowTone::Removal => Some(theme::MODAL_ROW_REMOVAL),
+            ModalRowTone::Hunk => Some(theme::MODAL_ROW_HUNK),
+        } {
+            rectangles.push(Rectangle::new(
+                row_origin,
+                [geometry.content_size[0], theme::LINE_HEIGHT],
+                color,
+            ));
+        }
         if row.selected || row.hovered {
             rectangles.push(Rectangle::new(
                 row_origin,
@@ -1158,7 +2110,25 @@ fn modal_rectangles(
                 },
             ));
         }
-        let label_columns = row.depth * 2 + 2 + row.label.chars().count();
+        if let Some(control) = &row.control {
+            rectangles.push(Rectangle::new(
+                [
+                    row_origin[0],
+                    row_origin[1] + (theme::LINE_HEIGHT - theme::MODAL_BADGE_HEIGHT) * 0.5,
+                ],
+                [
+                    theme::MODAL_ROW_CONTROL_WIDTH - theme::MODAL_BADGE_HORIZONTAL_PADDING,
+                    theme::MODAL_BADGE_HEIGHT,
+                ],
+                if control.enabled {
+                    theme::MODAL_CONTROL_BACKGROUND
+                } else {
+                    theme::MODAL_CONTROL_DISABLED
+                },
+            ));
+        }
+        let control_columns = row.control.as_ref().map_or(0, |_| 7);
+        let label_columns = control_columns + row.depth * 2 + 2 + row.label.chars().count();
         let mut badge_left = geometry.content_origin[0]
             + (label_columns as f32 + 2.0) * theme::APPROXIMATE_CELL_WIDTH
             - theme::MODAL_BADGE_HORIZONTAL_PADDING;
@@ -1175,6 +2145,63 @@ fn modal_rectangles(
             ));
             badge_left += width + 2.0 * theme::APPROXIMATE_CELL_WIDTH
                 - 2.0 * theme::MODAL_BADGE_HORIZONTAL_PADDING;
+        }
+    }
+
+    if let Some(composer) = &view.composer {
+        rectangles.push(Rectangle::new(
+            geometry.composer_field_origin,
+            geometry.composer_field_size,
+            theme::MODAL_FIELD_BACKGROUND,
+        ));
+        push_tab_outline(
+            &mut rectangles,
+            geometry.composer_field_origin,
+            geometry.composer_field_size,
+            1.0,
+            if composer.focused {
+                theme::TAB_ACTIVE_INDICATOR
+            } else {
+                theme::MODAL_BORDER
+            },
+        );
+        rectangles.push(Rectangle::new(
+            geometry.composer_button_origin,
+            geometry.composer_button_size,
+            if composer.button_enabled {
+                theme::MODAL_PRIMARY_BUTTON
+            } else {
+                theme::MODAL_CONTROL_DISABLED
+            },
+        ));
+    }
+
+    if view.horizontal_content_width > 0 {
+        let visible_columns =
+            (geometry.content_size[0] / theme::APPROXIMATE_CELL_WIDTH).floor() as usize;
+        if view.horizontal_content_width > visible_columns {
+            let track_width = geometry.content_size[0];
+            let thumb_width = (visible_columns as f32 / view.horizontal_content_width as f32
+                * track_width)
+                .max(theme::SCROLLBAR_MINIMUM_LENGTH)
+                .min(track_width);
+            let maximum_offset = view
+                .horizontal_content_width
+                .saturating_sub(visible_columns);
+            let progress = if maximum_offset == 0 {
+                0.0
+            } else {
+                view.horizontal_offset.min(maximum_offset) as f32 / maximum_offset as f32
+            };
+            rectangles.push(Rectangle::new(
+                [
+                    geometry.content_origin[0] + progress * (track_width - thumb_width),
+                    geometry.content_origin[1] + geometry.content_size[1]
+                        - theme::SCROLLBAR_THICKNESS,
+                ],
+                [thumb_width, theme::SCROLLBAR_THICKNESS],
+                theme::SCROLLBAR_THUMB,
+            ));
         }
     }
 
@@ -1197,6 +2224,93 @@ fn modal_rectangles(
             [theme::SCROLLBAR_THICKNESS, thumb_height],
             theme::SCROLLBAR_THUMB,
         ));
+    }
+    rectangles
+}
+
+fn agent_panel_text(view: &AgentPanelView) -> String {
+    let mut text = String::new();
+    text.push_str(&view.title);
+    text.push('\n');
+    text.push_str(&view.status);
+    if view.new_event_count > 0 {
+        text.push_str(" - ");
+        text.push_str(&view.new_event_count.to_string());
+        text.push_str(" new");
+    }
+    text.push_str("\n\n");
+    for row in &view.rows {
+        text.push_str(row);
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str("> ");
+    let mut composer = if view.composer.is_empty() {
+        view.placeholder.clone()
+    } else {
+        view.composer.clone()
+    };
+    if view.focused {
+        let cursor = view.composer_cursor.min(composer.len());
+        composer.insert(cursor, '|');
+    }
+    text.push_str(&composer);
+    text
+}
+
+fn agent_panel_rectangles(layout: AgentPanelLayout, focused: bool) -> Vec<Rectangle> {
+    let Some(drawer) = layout.drawer else {
+        return Vec::new();
+    };
+    let mut rectangles = Vec::with_capacity(12);
+    if let Some(splitter) = layout.splitter {
+        rectangles.push(Rectangle::new(
+            splitter.origin,
+            splitter.size,
+            theme::MODAL_BORDER,
+        ));
+    }
+    rectangles.push(Rectangle::new(
+        drawer.origin,
+        drawer.size,
+        theme::MODAL_BACKGROUND,
+    ));
+    push_tab_outline(
+        &mut rectangles,
+        drawer.origin,
+        drawer.size,
+        1.0,
+        theme::MODAL_BORDER,
+    );
+    if let Some(header) = layout.header {
+        rectangles.push(Rectangle::new(
+            header.origin,
+            header.size,
+            theme::TAB_ACTIVE_BACKGROUND,
+        ));
+        rectangles.push(Rectangle::new(
+            [header.origin[0], header.origin[1] + header.size[1] - 1.0],
+            [header.size[0], 1.0],
+            theme::MODAL_BORDER,
+        ));
+    }
+    if let Some(composer) = layout.composer {
+        rectangles.push(Rectangle::new(
+            composer.origin,
+            composer.size,
+            theme::MODAL_FIELD_BACKGROUND,
+        ));
+        push_tab_outline(
+            &mut rectangles,
+            composer.origin,
+            composer.size,
+            1.0,
+            if focused {
+                theme::TAB_ACTIVE_INDICATOR
+            } else {
+                theme::MODAL_BORDER
+            },
+        );
     }
     rectangles
 }
@@ -1462,8 +2576,9 @@ fn buffer_has_shaped_glyphs(buffer: &TextBuffer) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModalTextState, Rectangle, RectangleInstance, TabAction, logical_extent,
-        tab_action_at_position, tab_at_position, tab_width, translate_selection_rectangle,
+        ModalTextState, Rectangle, RectangleInstance, SplashAction, SplashTextState, TabAction,
+        logical_extent, splash_action_at_position, splash_layout, tab_action_at_position,
+        tab_at_position, tab_width, translate_selection_rectangle, update_splash_hover_state,
     };
     use crate::editor::{EditorLayout, SelectionRectangle};
     use crate::modal::{ModalBadge, ModalRow, ModalView};
@@ -1527,6 +2642,130 @@ mod tests {
         );
         assert_eq!(tab_action_at_position([100.0, 12.0], 400.0, 2), None);
         assert_eq!(tab_action_at_position([180.0, 50.0], 400.0, 2), None);
+    }
+
+    #[test]
+    fn splash_layout_centers_default_viewport() {
+        let layout = splash_layout([960.0, 640.0]);
+
+        assert_eq!(layout.content_width, crate::theme::SPLASH_CONTENT_WIDTH);
+        assert!((layout.content_origin[0] - 300.0).abs() < 0.01);
+        let center_y = layout.content_origin[1]
+            + (layout.actions.open_directory.origin[1] + layout.actions.open_directory.size[1]
+                - layout.content_origin[1])
+                * 0.5;
+        assert!((center_y - 320.0).abs() < 10.0);
+    }
+
+    #[test]
+    fn splash_layout_clamps_narrow_viewports_without_overlapping_actions() {
+        let layout = splash_layout([300.0, 360.0]);
+
+        assert_eq!(
+            layout.content_origin[0],
+            crate::theme::SPLASH_MINIMUM_PADDING
+        );
+        assert_eq!(layout.content_width, 252.0);
+        assert!(
+            layout.actions.open_directory.origin[1]
+                >= layout.actions.open_file.origin[1]
+                    + layout.actions.open_file.size[1]
+                    + crate::theme::SPLASH_ACTION_GAP
+        );
+        assert!(
+            layout.actions.open_directory.origin[1] + layout.actions.open_directory.size[1]
+                <= 360.0
+        );
+    }
+
+    #[test]
+    fn splash_actions_hit_test_edges_and_outside_points() {
+        let geometry = splash_layout([960.0, 640.0]).actions;
+        let open_file = geometry.open_file;
+        let open_directory = geometry.open_directory;
+
+        assert_eq!(
+            splash_action_at_position(open_file.origin, geometry),
+            Some(SplashAction::OpenFile)
+        );
+        assert_eq!(
+            splash_action_at_position(
+                [
+                    open_directory.origin[0] + open_directory.size[0] - 0.1,
+                    open_directory.origin[1] + open_directory.size[1] - 0.1,
+                ],
+                geometry
+            ),
+            Some(SplashAction::OpenDirectory)
+        );
+        assert_eq!(
+            splash_action_at_position(
+                [open_file.origin[0] + open_file.size[0], open_file.origin[1]],
+                geometry
+            ),
+            None
+        );
+        assert_eq!(
+            splash_action_at_position([open_file.origin[0] - 1.0, open_file.origin[1]], geometry),
+            None
+        );
+    }
+
+    #[test]
+    fn splash_hover_changes_only_when_the_action_changes() {
+        let viewport = [960.0, 640.0];
+        let geometry = splash_layout(viewport).actions;
+        let mut hover = None;
+
+        assert!(update_splash_hover_state(
+            &mut hover,
+            geometry.open_file.origin,
+            viewport
+        ));
+        assert_eq!(hover, Some(SplashAction::OpenFile));
+        assert!(!update_splash_hover_state(
+            &mut hover,
+            [
+                geometry.open_file.origin[0] + 2.0,
+                geometry.open_file.origin[1] + 2.0
+            ],
+            viewport
+        ));
+        assert!(update_splash_hover_state(
+            &mut hover,
+            geometry.open_directory.origin,
+            viewport
+        ));
+        assert_eq!(hover, Some(SplashAction::OpenDirectory));
+        assert!(update_splash_hover_state(
+            &mut hover,
+            [-1.0, -1.0],
+            viewport
+        ));
+        assert_eq!(hover, None);
+        assert!(!update_splash_hover_state(
+            &mut hover,
+            [-1.0, -1.0],
+            viewport
+        ));
+    }
+
+    #[test]
+    fn splash_text_shapes_all_buffers_and_hides_stale_state() {
+        let mut text = SplashTextState::new();
+
+        text.prepare([960.0, 640.0], Some(SplashAction::OpenFile));
+
+        assert!(text.has_shaped_glyphs());
+        assert!(text.prepared);
+        assert_eq!(text.hovered_action, Some(SplashAction::OpenFile));
+        assert!(!text.scene_rectangles.is_empty());
+
+        text.hide();
+
+        assert!(!text.prepared);
+        assert_eq!(text.hovered_action, None);
+        assert!(text.scene_rectangles.is_empty());
     }
 
     #[test]
@@ -1628,10 +2867,14 @@ mod tests {
         ModalView {
             title: "Project files".to_string(),
             subtitle: "/project".to_string(),
+            header_action: None,
             rows: Vec::new(),
             first_row: 0,
             total_rows: 0,
             status: "Scanning project...".to_string(),
+            composer: None,
+            horizontal_offset: 0,
+            horizontal_content_width: 0,
         }
     }
 
@@ -1639,12 +2882,15 @@ mod tests {
         ModalView {
             title: "Project files".to_string(),
             subtitle: "/project".to_string(),
+            header_action: None,
             rows: vec![
                 ModalRow {
                     id: "src".to_string(),
                     depth: 0,
                     label: "src".to_string(),
                     badges: Vec::new(),
+                    control: None,
+                    tone: crate::modal::ModalRowTone::Default,
                     expandable: true,
                     expanded: true,
                     selected: false,
@@ -1662,6 +2908,8 @@ mod tests {
                             label: "ignored".to_string(),
                         },
                     ],
+                    control: None,
+                    tone: crate::modal::ModalRowTone::Default,
                     expandable: false,
                     expanded: false,
                     selected: true,
@@ -1671,6 +2919,9 @@ mod tests {
             first_row: 0,
             total_rows: 2,
             status: "2 entries".to_string(),
+            composer: None,
+            horizontal_offset: 0,
+            horizontal_content_width: 0,
         }
     }
 

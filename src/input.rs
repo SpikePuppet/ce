@@ -18,6 +18,7 @@ pub enum FileCommand {
     Open,
     OpenFolder,
     ToggleFileTree,
+    ToggleGitPanel,
     Save,
     SaveAs,
     Close,
@@ -55,12 +56,24 @@ pub enum LanguageCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViewCommand {
+    ToggleMarkdownPresentation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCommand {
+    TogglePanel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
+    Agent(AgentCommand),
     File(FileCommand),
     Editor(EditorCommand),
     Clipboard(ClipboardCommand),
     History(HistoryCommand),
     Language(LanguageCommand),
+    View(ViewCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,12 +177,34 @@ impl InputState {
 }
 
 fn command_for_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
-    file_command(key, modifiers)
-        .map(Command::File)
+    agent_command(key, modifiers)
+        .map(Command::Agent)
+        .or_else(|| file_command(key, modifiers).map(Command::File))
         .or_else(|| history_command(key, modifiers).map(Command::History))
         .or_else(|| clipboard_command(key, modifiers).map(Command::Clipboard))
         .or_else(|| language_command(key, modifiers).map(Command::Language))
+        .or_else(|| view_command(key, modifiers).map(Command::View))
         .or_else(|| editor_command(key, modifiers).map(Command::Editor))
+}
+
+fn agent_command(key: &Key, modifiers: ModifiersState) -> Option<AgentCommand> {
+    if modifiers == ModifiersState::SUPER
+        && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("j"))
+    {
+        Some(AgentCommand::TogglePanel)
+    } else {
+        None
+    }
+}
+
+fn view_command(key: &Key, modifiers: ModifiersState) -> Option<ViewCommand> {
+    if modifiers == ModifiersState::SUPER
+        && matches!(key, Key::Character(character) if character.as_str() == "\\")
+    {
+        Some(ViewCommand::ToggleMarkdownPresentation)
+    } else {
+        None
+    }
 }
 
 fn language_command(key: &Key, modifiers: ModifiersState) -> Option<LanguageCommand> {
@@ -235,6 +270,8 @@ fn file_command(key: &Key, modifiers: ModifiersState) -> Option<FileCommand> {
 
     if character.eq_ignore_ascii_case("t") && !modifiers.shift_key() {
         Some(FileCommand::ToggleFileTree)
+    } else if character.eq_ignore_ascii_case("g") && modifiers.shift_key() {
+        Some(FileCommand::ToggleGitPanel)
     } else if character.eq_ignore_ascii_case("o") {
         Some(if modifiers.shift_key() {
             FileCommand::OpenFolder
@@ -344,8 +381,9 @@ mod tests {
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     use super::{
-        ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand, HistoryCommand,
-        InputState, LanguageCommand, command_for_key, file_command, text_input,
+        AgentCommand, ClipboardCommand, Command, EditorCommand, EditorInput, FileCommand,
+        HistoryCommand, InputState, LanguageCommand, ViewCommand, command_for_key, file_command,
+        text_input,
     };
 
     #[test]
@@ -376,6 +414,13 @@ mod tests {
         assert_eq!(
             file_command(&Key::Character("t".into()), ModifiersState::SUPER),
             Some(FileCommand::ToggleFileTree)
+        );
+        assert_eq!(
+            file_command(
+                &Key::Character("g".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(FileCommand::ToggleGitPanel)
         );
         assert_eq!(
             file_command(&Key::Character("o".into()), ModifiersState::SUPER),
@@ -452,6 +497,22 @@ mod tests {
         assert_eq!(
             command_for_key(&Key::Named(NamedKey::F12), ModifiersState::empty()),
             Some(Command::Language(LanguageCommand::GoToDefinition))
+        );
+    }
+
+    #[test]
+    fn view_shortcuts_map_to_explicit_commands() {
+        assert_eq!(
+            command_for_key(&Key::Character("\\".into()), ModifiersState::SUPER),
+            Some(Command::View(ViewCommand::ToggleMarkdownPresentation))
+        );
+    }
+
+    #[test]
+    fn agent_shortcuts_map_to_explicit_commands() {
+        assert_eq!(
+            command_for_key(&Key::Character("j".into()), ModifiersState::SUPER),
+            Some(Command::Agent(AgentCommand::TogglePanel))
         );
     }
 
